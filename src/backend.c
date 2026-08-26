@@ -3726,17 +3726,19 @@ int run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, con
 
     if (getenv ("HASHCAT_VK_DUMP") != NULL)
     {
-      if (vk_kern->entrypoint && strncmp (vk_kern->entrypoint, "m01800", 6) == 0)
+      if (vk_kern->entrypoint && (strncmp (vk_kern->entrypoint, "m01800", 6) == 0 || strncmp (vk_kern->entrypoint, "m00500", 6) == 0 || strncmp (vk_kern->entrypoint, "m00400", 6) == 0))
       {
-        const int args_to_dump[5] = { 0, 4, 15, 19, 17 };
+        const int args_to_dump[6] = { 0, 4, 15, 19, 17, 18 };
 
         fprintf (stderr, "[vkdump] %s:\n", vk_kern->entrypoint);
 
-        for (unsigned a = 0; a < 5; a++)
+        for (unsigned a = 0; a < 6; a++)
         {
           const hc_vk_buffer_t *b = (const hc_vk_buffer_t *) device_param->kernel_params[args_to_dump[a]];
 
           if (b == NULL) continue;
+
+          if (b->host == NULL) continue;
 
           const u64 *p = (const u64 *) b->host;
 
