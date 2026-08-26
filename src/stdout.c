@@ -61,6 +61,14 @@ int process_stdout (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param,
   user_options_extra_t *user_options_extra = hashcat_ctx->user_options_extra;
   user_options_t       *user_options       = hashcat_ctx->user_options;
 
+  // candidate buffers are read below and belong to kernels that the pipelined
+  // vulkan backend may still be running
+
+  if (device_param->is_vulkan == true)
+  {
+    if (hc_vkQueueIdle (hashcat_ctx, device_param->vk_queue) == -1) return -1;
+  }
+
   // prevent wrong candidates in output when backend_ctx->backend_devices_active > 1
 
   hc_thread_mutex_lock (outfile_ctx->mux_outfile);

@@ -49,6 +49,8 @@ static const struct option long_options[] =
   {"backend-ignore-metal",      no_argument,       NULL, IDX_BACKEND_IGNORE_METAL},
   #endif
   {"backend-ignore-opencl",     no_argument,       NULL, IDX_BACKEND_IGNORE_OPENCL},
+  {"backend-ignore-vulkan",     no_argument,       NULL, IDX_BACKEND_IGNORE_VULKAN},
+  {"native-vulkan",             no_argument,       NULL, IDX_NATIVE_VULKAN},
   {"backend-info",              no_argument,       NULL, IDX_BACKEND_INFO},
   {"backend-vector-width",      required_argument, NULL, IDX_BACKEND_VECTOR_WIDTH},
   {"bypass-delay",              required_argument, NULL, IDX_BYPASS_DELAY},
@@ -214,6 +216,8 @@ int user_options_init (hashcat_ctx_t *hashcat_ctx)
   user_options->backend_ignore_metal      = BACKEND_IGNORE_METAL;
   #endif
   user_options->backend_ignore_opencl     = BACKEND_IGNORE_OPENCL;
+  user_options->backend_ignore_vulkan     = BACKEND_IGNORE_VULKAN;
+  user_options->native_vulkan             = false;
   user_options->backend_info              = BACKEND_INFO;
   user_options->backend_vector_width      = BACKEND_VECTOR_WIDTH;
   user_options->benchmark_all             = BENCHMARK_ALL;
@@ -573,6 +577,8 @@ int user_options_getopt (hashcat_ctx_t *hashcat_ctx, int argc, char **argv)
       case IDX_BACKEND_IGNORE_METAL:      user_options->backend_ignore_metal      = true;                            break;
       #endif
       case IDX_BACKEND_IGNORE_OPENCL:     user_options->backend_ignore_opencl     = true;                            break;
+      case IDX_BACKEND_IGNORE_VULKAN:     user_options->backend_ignore_vulkan     = true;                            break;
+      case IDX_NATIVE_VULKAN:             user_options->native_vulkan             = true;                            break;
       case IDX_BACKEND_INFO:              user_options->backend_info++;                                              break;
       case IDX_BACKEND_DEVICES:           user_options->backend_devices           = optarg;                          break;
       case IDX_BACKEND_DEVICES_VIRTMULTI: user_options->backend_devices_virtmulti = hc_strtoul (optarg, NULL, 10);   break;

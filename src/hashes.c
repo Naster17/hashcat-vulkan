@@ -848,6 +848,15 @@ int check_hash (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, pla
         return -1;
       }
     }
+
+    if (device_param->is_vulkan == true)
+    {
+      if (hc_vkQueueIdle (hashcat_ctx, device_param->vk_queue) == -1) return -1;
+
+      memcpy (tmps, (char *) device_param->vk_d_tmps.host + plain->gidvid * hashconfig->tmp_size, hashconfig->tmp_size);
+
+      rc = 0;
+    }
   }
 
   // hash
@@ -1070,6 +1079,14 @@ int check_cracked (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param)
 
   int rc = -1;
 
+  // the vulkan backend pipelines its dispatches; result/plain buffers touched
+  // below may still be written by in-flight kernels right now
+
+  if (device_param->is_vulkan == true)
+  {
+    if (hc_vkQueueIdle (hashcat_ctx, device_param->vk_queue) == -1) return -1;
+  }
+
   if (device_param->is_cuda == true)
   {
     if (hc_cuMemcpyDtoH (hashcat_ctx, &num_cracked, device_param->cuda_d_result, sizeof (u32)) == -1) return -1;
@@ -1095,6 +1112,11 @@ int check_cracked (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param)
   {
     /* blocking */
     if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_result, CL_TRUE, 0, sizeof (u32), &num_cracked, 0, NULL, NULL) == -1) return -1;
+  }
+
+  if (device_param->is_vulkan == true)
+  {
+    memcpy (&num_cracked, device_param->vk_d_result.host, sizeof (u32));
   }
 
   if (num_cracked == 0 || user_options->speed_only == true)
@@ -1166,6 +1188,21 @@ int check_cracked (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param)
 
       return -1;
     }
+  }
+
+  if (device_param->is_vulkan == true)
+  {
+    memcpy (cracked, device_param->vk_d_plain_bufs.host, num_cracked * sizeof (plain_t));
+
+    if (getenv ("HASHCAT_VK_DUMP"))
+    {
+      fprintf (stderr, "[host] num_cracked=%u\n", num_cracked);
+      for (u32 i = 0; i < num_cracked; i++)
+        fprintf (stderr, "  [%u] gid=%llu salt=%u dgst=%u hash=%u\n", i,
+                 (unsigned long long) cracked[i].gidvid, cracked[i].salt_pos,
+                 cracked[i].digest_pos, cracked[i].hash_pos);
+    }
+    rc = 0;
   }
 
   u32 cpt_cracked = 0;

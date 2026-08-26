@@ -51,8 +51,34 @@ static const u32 bzeros[4] = { 0, 0, 0, 0 };
 /* forward declarations */
 static void rebuild_pws_compressed_append (hc_device_param_t *device_param, const u64 pws_cnt, const u8 chr);
 //
+int run_vulkan_kernel_atinit      (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 num);
+int run_vulkan_kernel_utf8toutf16le (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 num);
+int run_vulkan_kernel_memset      (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 offset, const u8  value, const u64 size);
+int run_vulkan_kernel_memset32    (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 offset, const u32 value, const u64 size);
+int run_vulkan_kernel_bzero       (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 size);
 static bool is_same_device (const hc_device_param_t *src, const hc_device_param_t *dst)
 {
+  // Vulkan can't have aliases among themselves
+
+  if ((src->is_vulkan == true) && (dst->is_vulkan == true)) return false;
+
+  // A Vulkan device aliases a CUDA/HIP/OpenCL device only when both report the same name.
+  // We do not query PCI info under Vulkan, so the PCI comparison below could never match
+  // (or worse, everything without PCI info would match everything else).
+
+  if ((src->is_vulkan == true) || (dst->is_vulkan == true))
+  {
+    const hc_device_param_t *vk_dev  = (src->is_vulkan == true) ? src : dst;
+    const hc_device_param_t *oth_dev = (src->is_vulkan == true) ? dst : src;
+
+    if ((vk_dev->device_name != NULL) && (oth_dev->device_name != NULL))
+    {
+      if (strcmp (vk_dev->device_name, oth_dev->device_name) == 0) return true;
+    }
+
+    return false;
+  }
+
   // First check by PCI address
 
   if (src->pcie_domain   != dst->pcie_domain)   return false; // PCI domain not available on OpenCL
@@ -423,7 +449,13 @@ static int backend_ctx_find_alias_devices (hashcat_ctx_t *hashcat_ctx)
 
       alias_device->skipped = true;
 
-      backend_ctx->opencl_devices_active--;
+      // the opencl counter only describes opencl devices, a skipped vulkan device is not one of them
+
+      if (alias_device->is_opencl == true)
+      {
+        backend_ctx->opencl_devices_active--;
+      }
+
       backend_ctx->backend_devices_active--;
 
       // show a warning for specifically listed devices if they are an alias
@@ -447,6 +479,7 @@ static bool is_same_device_type (const hc_device_param_t *src, const hc_device_p
   if (src->is_metal  != dst->is_metal)  return false;
   #endif
   if (src->is_opencl != dst->is_opencl) return false;
+  if (src->is_vulkan != dst->is_vulkan) return false;
 
   if (strcmp (src->device_name, dst->device_name) != 0) return false;
 
@@ -986,6 +1019,24 @@ static u32 pcfg_pt_case (const hashconfig_t *hashconfig)
   return 0;
 }
 
+// Optimized kernels that clspv cannot compile correctly. clspv drops the low bits of
+// dynamic byte-index stores into private arrays (the SPIR-V shows (idx & ~7) + base
+// where the source says idx ^ 7), so any optimized kernel built on that pattern hashes
+// garbage. The pure kernels avoid the pattern and run correctly, so for these modes
+// the vulkan backend silently falls back to the pure source even under -O. Verified
+// against the self-test vectors: the listed mode fails its self-test with the
+// optimized source and passes with the pure one.
+
+static bool vk_optimized_kernel_broken (const u32 kern_type)
+{
+  switch (kern_type)
+  {
+    case 1800: return true; // sha512crypt $6$, SHA2-512
+  }
+
+  return false;
+}
+
 void generate_source_kernel_filename (const bool slow_candidates, const u32 attack_exec, const u32 attack_kern, const u32 kern_type, const u32 opti_type, char *shared_dir, char *source_file)
 {
   if (opti_type & OPTI_TYPE_OPTIMIZED_KERNEL)
@@ -1207,6 +1258,11 @@ int gidd_to_pw_t (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, c
     if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_idx, CL_TRUE, gidd * sizeof (pw_idx_t), sizeof (pw_idx_t), &pw_idx, 0, NULL, NULL) == -1) return -1;
   }
 
+  if (device_param->is_vulkan == true)
+  {
+    memcpy (&pw_idx, (char *) device_param->vk_d_pws_idx.host + (gidd * sizeof (pw_idx_t)), sizeof (pw_idx_t));
+  }
+
   const u32 off = pw_idx.off;
   const u32 cnt = pw_idx.cnt;
   const u32 len = pw_idx.len;
@@ -1260,6 +1316,11 @@ int gidd_to_pw_t (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, c
       /* blocking */
       if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_comp_buf, CL_TRUE, off * sizeof (u32), cnt * sizeof (u32), pw->i, 0, NULL, NULL) == -1) return -1;
     }
+
+    if (device_param->is_vulkan == true)
+    {
+      memcpy (pw->i, (char *) device_param->vk_d_pws_comp_buf.host + (off * sizeof (u32)), cnt * sizeof (u32));
+    }
   }
 
   for (u32 i = cnt; i < 64; i++)
@@ -1312,6 +1373,11 @@ int copy_pws_idx (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, u
     if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_idx, CL_TRUE, gidd * sizeof (pw_idx_t), (cnt * sizeof (pw_idx_t)), dest, 0, NULL, NULL) == -1) return -1;
   }
 
+  if (device_param->is_vulkan == true)
+  {
+    memcpy (dest, (char *) device_param->vk_d_pws_idx.host + (gidd * sizeof (pw_idx_t)), (cnt * sizeof (pw_idx_t)));
+  }
+
   return 0;
 }
 
@@ -1348,6 +1414,11 @@ int copy_pws_comp (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
   {
     /* blocking */
     if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_comp_buf, CL_TRUE, off * sizeof (u32), cnt * sizeof (u32), dest, 0, NULL, NULL) == -1) return -1;
+  }
+
+  if (device_param->is_vulkan == true)
+  {
+    memcpy (dest, (char *) device_param->vk_d_pws_comp_buf.host + (off * sizeof (u32)), cnt * sizeof (u32));
   }
 
   return 0;
@@ -1494,6 +1565,11 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
             if (run_opencl_kernel_bzero (hashcat_ctx, device_param, device_param->opencl_d_tm_c, size_tm) == -1) return -1;
           }
 
+          if (device_param->is_vulkan == true)
+          {
+            if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_tm_c, size_tm) == -1) return -1;
+          }
+
           if (run_kernel_tm (hashcat_ctx, device_param) == -1) return -1;
 
           if (device_param->is_cuda == true)
@@ -1518,6 +1594,11 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
             if (hc_clEnqueueCopyBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_tm_c, device_param->opencl_d_bfs_c, 0, 0, size_tm, 0, NULL, NULL) == -1) return -1;
 
             if (hc_clFlush (hashcat_ctx, device_param->opencl_command_queue) == -1) return -1;
+          }
+
+          if (device_param->is_vulkan == true)
+          {
+            if (hc_vkCopyBuffer (hashcat_ctx, &device_param->vk_d_tm_c, &device_param->vk_d_bfs_c, 0, 0, size_tm) == -1) return -1;
           }
         }
       }
@@ -1640,6 +1721,11 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
         if (hc_clEnqueueCopyBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_amp_buf, device_param->opencl_d_pws_buf, 0, 0, pws_cnt * sizeof (pw_t), 0, NULL, NULL) == -1) return -1;
       }
 
+      if (device_param->is_vulkan == true)
+      {
+        if (hc_vkCopyBuffer (hashcat_ctx, &device_param->vk_d_pws_amp_buf, &device_param->vk_d_pws_buf, 0, 0, pws_cnt * sizeof (pw_t)) == -1) return -1;
+      }
+
       if (user_options->slow_candidates == true)
       {
       }
@@ -1670,6 +1756,11 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
         if (device_param->is_opencl == true)
         {
           if (run_opencl_kernel_utf8toutf16le (hashcat_ctx, device_param, device_param->opencl_d_pws_buf, pws_cnt) == -1) return -1;
+        }
+
+        if (device_param->is_vulkan == true)
+        {
+          if (run_vulkan_kernel_utf8toutf16le (hashcat_ctx, device_param, &device_param->vk_d_pws_buf, pws_cnt) == -1) return -1;
         }
       }
 
@@ -1707,6 +1798,13 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
         {
           /* blocking */
           if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_hooks, CL_TRUE, 0, pws_cnt * hashconfig->hook_size, device_param->hooks_buf, 0, NULL, NULL) == -1) return -1;
+        }
+
+        if (device_param->is_vulkan == true)
+        {
+          if (hc_vkQueueIdle (hashcat_ctx, device_param->vk_queue) == -1) return -1;
+
+          memcpy (device_param->hooks_buf, device_param->vk_d_hooks.host, pws_cnt * hashconfig->hook_size);
         }
 
         const int hook_threads = (int) user_options->hook_threads;
@@ -1761,6 +1859,11 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
         if (device_param->is_opencl == true)
         {
           if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_hooks, CL_TRUE, 0, pws_cnt * hashconfig->hook_size, device_param->hooks_buf, 0, NULL, NULL) == -1) return -1;
+        }
+
+        if (device_param->is_vulkan == true)
+        {
+          memcpy (device_param->vk_d_hooks.host, device_param->hooks_buf, pws_cnt * hashconfig->hook_size);
         }
       }
     }
@@ -1894,6 +1997,13 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
               if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_hooks, CL_TRUE, 0, pws_cnt * hashconfig->hook_size, device_param->hooks_buf, 0, NULL, NULL) == -1) return -1;
             }
 
+            if (device_param->is_vulkan == true)
+            {
+              if (hc_vkQueueIdle (hashcat_ctx, device_param->vk_queue) == -1) return -1;
+
+              memcpy (device_param->hooks_buf, device_param->vk_d_hooks.host, pws_cnt * hashconfig->hook_size);
+            }
+
             const int hook_threads = (int) user_options->hook_threads;
 
             hook_thread_param_t *hook_threads_param = (hook_thread_param_t *) hcmalloc (hook_threads * sizeof (hook_thread_param_t));
@@ -1946,6 +2056,11 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
             if (device_param->is_opencl == true)
             {
               if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_hooks, CL_TRUE, 0, pws_cnt * hashconfig->hook_size, device_param->hooks_buf, 0, NULL, NULL) == -1) return -1;
+            }
+
+            if (device_param->is_vulkan == true)
+            {
+              memcpy (device_param->vk_d_hooks.host, device_param->hooks_buf, pws_cnt * hashconfig->hook_size);
             }
           }
         }
@@ -2043,6 +2158,13 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
               if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_tmps, CL_TRUE, 0, pws_cnt * hashconfig->tmp_size, device_param->h_tmps, 0, NULL, NULL) == -1) return -1;
             }
 
+            if (device_param->is_vulkan == true)
+            {
+              if (hc_vkQueueIdle (hashcat_ctx, device_param->vk_queue) == -1) return -1;
+
+              memcpy (device_param->h_tmps, device_param->vk_d_tmps.host, pws_cnt * hashconfig->tmp_size);
+            }
+
             if (bridge_ctx->launch_loop2 (hashcat_ctx, bridge_ctx->platform_context, device_param, hashconfig, hashes, salt_pos, pws_cnt) == false) return -1;
 
             if (device_param->is_cuda == true)
@@ -2070,6 +2192,11 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
             {
               /* blocking */
               if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_tmps, CL_TRUE, 0, pws_cnt * hashconfig->tmp_size, device_param->h_tmps, 0, NULL, NULL) == -1) return -1;
+            }
+
+            if (device_param->is_vulkan == true)
+            {
+              memcpy (device_param->vk_d_tmps.host, device_param->h_tmps, pws_cnt * hashconfig->tmp_size);
             }
           }
         }
@@ -2215,6 +2342,11 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
       if (device_param->is_opencl == true)
       {
         if (run_opencl_kernel_bzero (hashcat_ctx, device_param, device_param->opencl_d_hooks, pws_cnt * hashconfig->hook_size) == -1) return -1;
+      }
+
+      if (device_param->is_vulkan == true)
+      {
+        if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_hooks, pws_cnt * hashconfig->hook_size) == -1) return -1;
       }
     }
   }
@@ -2737,6 +2869,76 @@ int run_opencl_kernel_bzero (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *devi
   }
 
   return 0;
+}
+
+// The vulkan helpers below mirror their opencl siblings. Buffers are persistently mapped and host
+// coherent, so a "transfer" is a memcpy, and memset/bzero do not need a kernel at all.
+//
+// Helper kernels compiled by clspv take their scalar arguments out of one extra storage buffer the
+// compiler appends behind the pointer arguments. We bind device_param->vk_d_kernel_param for that
+// slot with the scalar at offset 0, which matches clspv's packing of a single leading scalar.
+
+int run_vulkan_kernel_atinit (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 num)
+{
+  u64 num_elements = num;
+
+  device_param->kernel_params_atinit_buf64[1] = num_elements;
+
+  u64 kernel_threads = device_param->kernel_wgs_atinit;
+
+  if (kernel_threads == 0) kernel_threads = 1;
+
+  num_elements = round_up_multiple_64 (num_elements, kernel_threads);
+
+  vk_kernel kernel = device_param->vk_kernel_atinit;
+
+  memcpy (device_param->vk_d_kernel_param.host, &device_param->kernel_params_atinit_buf64[1], sizeof (u64));
+
+  if (hc_vkSetKernelArg (hashcat_ctx, kernel, 0, buf) == -1) return -1;
+  if (hc_vkSetKernelArg (hashcat_ctx, kernel, 1, &device_param->vk_d_kernel_param) == -1) return -1;
+
+  if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, kernel, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+
+  return 0;
+}
+
+int run_vulkan_kernel_utf8toutf16le (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 num)
+{
+  u64 num_elements = num;
+
+  device_param->kernel_params_utf8toutf16le_buf64[1] = num_elements;
+
+  u64 kernel_threads = device_param->kernel_wgs_utf8toutf16le;
+
+  if (kernel_threads == 0) kernel_threads = 1;
+
+  num_elements = round_up_multiple_64 (num_elements, kernel_threads);
+
+  vk_kernel kernel = device_param->vk_kernel_utf8toutf16le;
+
+  memcpy (device_param->vk_d_kernel_param.host, &device_param->kernel_params_utf8toutf16le_buf64[1], sizeof (u64));
+
+  if (hc_vkSetKernelArg (hashcat_ctx, kernel, 0, buf) == -1) return -1;
+  if (hc_vkSetKernelArg (hashcat_ctx, kernel, 1, &device_param->vk_d_kernel_param) == -1) return -1;
+
+  if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, kernel, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+
+  return 0;
+}
+
+int run_vulkan_kernel_memset (hashcat_ctx_t *hashcat_ctx, MAYBE_UNUSED hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 offset, const u8 value, const u64 size)
+{
+  return hc_vkFillBuffer8 (hashcat_ctx, buf, (size_t) offset, value, (size_t) size);
+}
+
+int run_vulkan_kernel_memset32 (hashcat_ctx_t *hashcat_ctx, MAYBE_UNUSED hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 offset, const u32 value, const u64 size)
+{
+  return hc_vkFillBuffer32 (hashcat_ctx, buf, (size_t) offset, value, (size_t) size);
+}
+
+int run_vulkan_kernel_bzero (hashcat_ctx_t *hashcat_ctx, MAYBE_UNUSED hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 size)
+{
+  return hc_vkFillBuffer8 (hashcat_ctx, buf, 0, 0, (size_t) size);
 }
 
 // What share of the SM's on-chip memory is asked for as shared memory, as a percentage, when the
@@ -3335,28 +3537,232 @@ int run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, con
     {
       float exec_ms = (float) ms;
 
-      if (event_update)
+    if (event_update)
+    {
+      u32 exec_pos = device_param->exec_pos;
+
+      device_param->exec_msec[exec_pos] = exec_ms;
+
+      exec_pos++;
+
+      if (exec_pos == EXEC_CACHE)
       {
-        u32 exec_pos = device_param->exec_pos;
-
-        device_param->exec_msec[exec_pos] = exec_ms;
-
-        exec_pos++;
-
-        if (exec_pos == EXEC_CACHE)
-        {
-          exec_pos = 0;
-        }
-
-        device_param->exec_pos = exec_pos;
+        exec_pos = 0;
       }
+
+      device_param->exec_pos = exec_pos;
     }
+  }
 
     // release tmp_buf
 
     if (rc_cc == -1) return -1;
   }
   #endif // __APPLE__
+
+  if (device_param->is_vulkan == true)
+  {
+    vk_kernel vk_kern = NULL;
+
+    switch (kern_run)
+    {
+      case KERN_RUN_1:      vk_kern = device_param->vk_kernel1;       break;
+      case KERN_RUN_12:     vk_kern = device_param->vk_kernel12;      break;
+      case KERN_RUN_2P:     vk_kern = device_param->vk_kernel2p;      break;
+      case KERN_RUN_2:      vk_kern = device_param->vk_kernel2;       break;
+      case KERN_RUN_2E:     vk_kern = device_param->vk_kernel2e;      break;
+      case KERN_RUN_23:     vk_kern = device_param->vk_kernel23;      break;
+      case KERN_RUN_3:      vk_kern = device_param->vk_kernel3;       break;
+      case KERN_RUN_4:      vk_kern = device_param->vk_kernel4;       break;
+      case KERN_RUN_INIT2:  vk_kern = device_param->vk_kernel_init2;  break;
+      case KERN_RUN_LOOP2P: vk_kern = device_param->vk_kernel_loop2p; break;
+      case KERN_RUN_LOOP2:  vk_kern = device_param->vk_kernel_loop2;  break;
+      case KERN_RUN_AUX1:   vk_kern = device_param->vk_kernel_aux1;   break;
+      case KERN_RUN_AUX2:   vk_kern = device_param->vk_kernel_aux2;   break;
+      case KERN_RUN_AUX3:   vk_kern = device_param->vk_kernel_aux3;   break;
+      case KERN_RUN_AUX4:   vk_kern = device_param->vk_kernel_aux4;   break;
+    }
+
+    // scalars live in this packed struct, copied straight into the mapped parameter buffer
+
+    memcpy (device_param->vk_d_kernel_param.host, &device_param->kernel_param, device_param->size_kernel_params);
+
+    // every kernel argument is a pointer arg, so binding i is the buffer kernel_params[i] points at
+
+    const u32 kernel_params_max = (hashcat_ctx->user_options_extra->attack_kern == ATTACK_KERN_PCFG) ? 27 : 24;
+
+    for (u32 i = 0; i <= kernel_params_max; i++)
+    {
+      if (device_param->kernel_params[i] == NULL) continue;
+
+      if (hc_vkSetKernelArg (hashcat_ctx, vk_kern, i, (hc_vk_buffer_t *) device_param->kernel_params[i]) == -1) return -1;
+    }
+
+    // local size 1 is avoided: kernels are always compiled with a local size
+    // of at least 2, because at 1 some drivers (RADV on Phoenix) take minutes
+    // to compile specialized pipelines of the big loop-hash kernels; the
+    // GID_CNT guard makes the spare thread a no-op
+
+    if (kernel_threads < 2) kernel_threads = 2;
+
+    if ((hashconfig->opts_type & OPTS_TYPE_THREAD_MULTI_DISABLE) == 0)
+    {
+      num_elements = round_up_multiple_64 (num_elements, kernel_threads);
+    }
+
+    if (kern_run == KERN_RUN_1)
+    {
+      if (hashconfig->opti_type & OPTI_TYPE_SLOW_HASH_SIMD_INIT)
+      {
+        num_elements = CEILDIV (num_elements, device_param->vector_width);
+      }
+    }
+    else if (kern_run == KERN_RUN_2)
+    {
+      if (hashconfig->opti_type & OPTI_TYPE_SLOW_HASH_SIMD_LOOP)
+      {
+        num_elements = CEILDIV (num_elements, device_param->vector_width);
+      }
+    }
+    else if (kern_run == KERN_RUN_3)
+    {
+      if (hashconfig->opti_type & OPTI_TYPE_SLOW_HASH_SIMD_COMP)
+      {
+        num_elements = CEILDIV (num_elements, device_param->vector_width);
+      }
+    }
+
+    if ((hashconfig->opts_type & OPTS_TYPE_THREAD_MULTI_DISABLE) == 0)
+    {
+      num_elements = round_up_multiple_64 (num_elements, kernel_threads);
+    }
+    else
+    {
+      num_elements = num_elements * kernel_threads;
+    }
+
+    uint64_t global_x = num_elements;
+
+    uint64_t global_y = 1;
+
+    bool dimy = false;
+
+    if ((hashconfig->opti_type & OPTI_TYPE_SLOW_HASH_DIMY_INIT) && (kern_run == KERN_RUN_1))
+    {
+      global_y = hashcat_ctx->hashes->salts_buf->salt_dimy;
+
+      dimy = true;
+    }
+
+    if ((hashconfig->opti_type & OPTI_TYPE_SLOW_HASH_DIMY_LOOP) && (kern_run == KERN_RUN_2))
+    {
+      global_y = hashcat_ctx->hashes->salts_buf->salt_dimy;
+
+      dimy = true;
+    }
+
+    if ((hashconfig->opti_type & OPTI_TYPE_SLOW_HASH_DIMY_COMP) && (kern_run == KERN_RUN_3))
+    {
+      global_y = hashcat_ctx->hashes->salts_buf->salt_dimy;
+
+      dimy = true;
+    }
+
+    // make sure the pipeline's local size matches what we are about to launch.
+    // the y dimension of the workgroup is always 1; a dimy launch is expressed
+    // purely as more groups in y, like the other backends express it via global size
+
+    (void) dimy;
+
+    if (getenv ("HASHCAT_VK_DEBUG"))
+    {
+      fprintf (stderr, "[vk] run_kernel: kern_run=%d entry=%s kernel_threads=%llu global_x=%llu global_y=%llu loop_pos=%u loop_cnt=%u il_pos=%u dgst_off=%u salt_pos=%u digests_cnt=%u\n",
+               (int) kern_run, vk_kern->entrypoint ? vk_kern->entrypoint : "?",
+               (unsigned long long) kernel_threads, (unsigned long long) global_x, (unsigned long long) global_y,
+               (unsigned) device_param->kernel_param.loop_pos, (unsigned) device_param->kernel_param.loop_cnt,
+               (unsigned) iteration,
+               (unsigned) device_param->kernel_param.digests_offset_host,
+               (unsigned) device_param->kernel_param.salt_pos_host,
+               (unsigned) hashcat_ctx->hashes->salts_buf[0].digests_cnt);
+      fflush (stderr);
+    }
+
+    if ((vk_kern->local_size_x != (uint32_t) kernel_threads) || (vk_kern->local_size_y != 1))
+    {
+      if (hc_vkKernelCompile (hashcat_ctx, vk_kern, device_param->vk_module, device_param->vk_module_refl, vk_kern->entrypoint, (uint32_t) kernel_threads, 1) == -1) return -1;
+    }
+
+    if (is_autotune == true)
+    {
+      if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, global_x, global_y, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+    }
+
+    double exec_ms = 0;
+
+    // exec_ms feeds the Exec.Kernel cache. inside the async window the dispatch
+    // answers with the previous same-kernel run (slot timestamps), outside with
+    // a real measurement (blocked dispatch). neither case needs run_kernel to
+    // know anything about them.
+
+    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, global_x, global_y, device_param->vk_d_kernel_param.host, &exec_ms) == -1) return -1;
+
+    if (getenv ("HASHCAT_VK_DUMP") != NULL)
+    {
+      if (vk_kern->entrypoint && strncmp (vk_kern->entrypoint, "m01800", 6) == 0)
+      {
+        const int args_to_dump[5] = { 0, 4, 15, 19, 17 };
+
+        fprintf (stderr, "[vkdump] %s:\n", vk_kern->entrypoint);
+
+        for (unsigned a = 0; a < 5; a++)
+        {
+          const hc_vk_buffer_t *b = (const hc_vk_buffer_t *) device_param->kernel_params[args_to_dump[a]];
+
+          if (b == NULL) continue;
+
+          const u64 *p = (const u64 *) b->host;
+
+          fprintf (stderr, "  arg%02d:", args_to_dump[a]);
+
+          for (int i = 0; i < 8; i++) fprintf (stderr, " %016llx", (unsigned long long) p[0 * 8 + i]);
+
+          fprintf (stderr, "\n");
+        }
+
+        // pw_len field at offset 256 of the first pw_t entry, plus the salt buffers
+
+        const hc_vk_buffer_t *pws_b = (const hc_vk_buffer_t *) device_param->kernel_params[0];
+
+        fprintf (stderr, "  pw_len[0]: %08x pw_len[1]: %08x\n", ((const u32 *) pws_b->host)[64], ((const u32 *) pws_b->host)[130]);
+
+        const hc_vk_buffer_t *salt_b = (const hc_vk_buffer_t *) device_param->kernel_params[17];
+
+        fprintf (stderr, "  salt:");
+
+        for (int i = 0; i < 12; i++) fprintf (stderr, " %08x", ((const u32 *) salt_b->host)[i]);
+
+        fprintf (stderr, "\n");
+
+        fflush (stderr);
+      }
+    }
+
+    if (event_update)
+    {
+      u32 exec_pos = device_param->exec_pos;
+
+      device_param->exec_msec[exec_pos] = exec_ms;
+
+      exec_pos++;
+
+      if (exec_pos == EXEC_CACHE)
+      {
+        exec_pos = 0;
+      }
+
+      device_param->exec_pos = exec_pos;
+    }
+  }
 
   if (device_param->is_opencl == true)
   {
@@ -3478,6 +3884,52 @@ int run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, con
     }
 
     if (hc_clEnqueueNDRangeKernel (hashcat_ctx, device_param->opencl_command_queue, opencl_kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, &opencl_event) == -1) return -1;
+
+    if (getenv ("HASHCAT_VK_DUMP") != NULL)
+    {
+      if (hashcat_ctx->hashconfig->hash_mode == 1800)
+      {
+        const int args_to_dump[5] = { 0, 4, 15, 19, 17 };
+
+        fprintf (stderr, "[cldump] kern_run=%d:\n", (int) kern_run);
+
+        for (unsigned a = 0; a < 5; a++)
+        {
+          const cl_mem *m = (const cl_mem *) device_param->kernel_params[args_to_dump[a]];
+
+          u64 p[8];
+
+          if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, *m, CL_TRUE, 0, sizeof (p), p, 0, NULL, NULL) == -1) continue;
+
+          fprintf (stderr, "  arg%02d:", args_to_dump[a]);
+
+          for (int i = 0; i < 8; i++) fprintf (stderr, " %016llx", (unsigned long long) p[i]);
+
+          fprintf (stderr, "\n");
+        }
+
+        {
+          const cl_mem *m  = (const cl_mem *) device_param->kernel_params[0];
+          const cl_mem *m2 = (const cl_mem *) device_param->kernel_params[17];
+
+          u32 extra[12];
+
+          hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, *m, CL_TRUE, 256, 8, extra, 0, NULL, NULL);
+
+          fprintf (stderr, "  pw_len[0..1]: %08x %08x\n", extra[0], extra[1]);
+
+          hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, *m2, CL_TRUE, 0, sizeof (extra), extra, 0, NULL, NULL);
+
+          fprintf (stderr, "  salt:");
+
+          for (int i = 0; i < 12; i++) fprintf (stderr, " %08x", extra[i]);
+
+          fprintf (stderr, "\n");
+        }
+
+        fflush (stderr);
+      }
+    }
 
     // spin damper section
 
@@ -3635,6 +4087,13 @@ int run_bridge_loop (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param
     if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_tmps, CL_TRUE, 0, pws_cnt * hashconfig->tmp_size, device_param->h_tmps, 0, NULL, NULL) == -1) return -1;
   }
 
+  if (device_param->is_vulkan == true)
+  {
+    if (hc_vkQueueIdle (hashcat_ctx, device_param->vk_queue) == -1) return -1;
+
+    memcpy (device_param->h_tmps, device_param->vk_d_tmps.host, pws_cnt * hashconfig->tmp_size);
+  }
+
   hc_timer_t timer_stage = timer_bridge;
 
   pipe_acc (PIPE_XFER, &timer_stage);
@@ -3668,6 +4127,11 @@ int run_bridge_loop (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param
   {
     /* blocking */
     if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_tmps, CL_TRUE, 0, pws_cnt * hashconfig->tmp_size, device_param->h_tmps, 0, NULL, NULL) == -1) return -1;
+  }
+
+  if (device_param->is_vulkan == true)
+  {
+    memcpy (device_param->vk_d_tmps.host, device_param->h_tmps, pws_cnt * hashconfig->tmp_size);
   }
 
   pipe_acc (PIPE_XFER, &timer_stage);
@@ -3882,6 +4346,79 @@ int run_kernel_mp (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
     if (hc_clEnqueueNDRangeKernel (hashcat_ctx, device_param->opencl_command_queue, opencl_kernel, 1, NULL, global_work_size, local_work_size, 0, NULL, NULL) == -1) return -1;
   }
 
+  if (device_param->is_vulkan == true)
+  {
+    vk_kernel vk_kern = NULL;
+
+    // clspv keeps every scalar argument in one trailing storage buffer. Pack them in
+    // declaration order with natural alignment and bind that buffer behind the pointers
+
+    u64 *pod = (u64 *) device_param->vk_d_kernel_param.host;
+
+    if (kern_run == KERN_RUN_MP)
+    {
+      vk_kern = device_param->vk_kernel_mp;
+
+      memcpy (&pod[0], device_param->kernel_params_mp[3], sizeof (u64));
+      memcpy ((u32 *) &pod[1] + 0, device_param->kernel_params_mp[4], sizeof (u32));
+      memcpy ((u32 *) &pod[1] + 1, device_param->kernel_params_mp[5], sizeof (u32));
+      memcpy ((u32 *) &pod[1] + 2, device_param->kernel_params_mp[6], sizeof (u32));
+      memcpy ((u32 *) &pod[1] + 3, device_param->kernel_params_mp[7], sizeof (u32));
+      memcpy (&pod[3], device_param->kernel_params_mp[8], sizeof (u64));
+    }
+    else if (kern_run == KERN_RUN_MP_R)
+    {
+      vk_kern = device_param->vk_kernel_mp_r;
+
+      memcpy (&pod[0], device_param->kernel_params_mp_r[3], sizeof (u64));
+      memcpy ((u32 *) &pod[1] + 0, device_param->kernel_params_mp_r[4], sizeof (u32));
+      memcpy ((u32 *) &pod[1] + 1, device_param->kernel_params_mp_r[5], sizeof (u32));
+      memcpy ((u32 *) &pod[1] + 2, device_param->kernel_params_mp_r[6], sizeof (u32));
+      memcpy ((u32 *) &pod[1] + 3, device_param->kernel_params_mp_r[7], sizeof (u32));
+      memcpy (&pod[3], device_param->kernel_params_mp_r[8], sizeof (u64));
+    }
+    else if (kern_run == KERN_RUN_MP_L)
+    {
+      vk_kern = device_param->vk_kernel_mp_l;
+
+      memcpy (&pod[0], device_param->kernel_params_mp_l[3], sizeof (u64));
+      memcpy ((u32 *) &pod[1] + 0, device_param->kernel_params_mp_l[4], sizeof (u32));
+      memcpy ((u32 *) &pod[1] + 1, device_param->kernel_params_mp_l[5], sizeof (u32));
+      memcpy ((u32 *) &pod[1] + 2, device_param->kernel_params_mp_l[6], sizeof (u32));
+      memcpy ((u32 *) &pod[1] + 3, device_param->kernel_params_mp_l[7], sizeof (u32));
+      memcpy ((u32 *) &pod[1] + 4, device_param->kernel_params_mp_l[8], sizeof (u32));
+      memcpy (&pod[4], device_param->kernel_params_mp_l[9], sizeof (u64));
+    }
+
+    for (u32 i = 0; i < 3; i++)
+    {
+      hc_vk_buffer_t *arg_buf = NULL;
+
+      if (kern_run == KERN_RUN_MP)   arg_buf = (hc_vk_buffer_t *) device_param->kernel_params_mp[i];
+      if (kern_run == KERN_RUN_MP_R) arg_buf = (hc_vk_buffer_t *) device_param->kernel_params_mp_r[i];
+      if (kern_run == KERN_RUN_MP_L) arg_buf = (hc_vk_buffer_t *) device_param->kernel_params_mp_l[i];
+
+      if (arg_buf == NULL) continue;
+
+      if (hc_vkSetKernelArg (hashcat_ctx, vk_kern, i, arg_buf) == -1) return -1;
+    }
+
+    // the scalar pack buffer sits right behind the pointer bindings
+
+    if (hc_vkSetKernelArg (hashcat_ctx, vk_kern, 3, &device_param->vk_d_kernel_param) == -1) return -1;
+
+    if (kernel_threads < 2) kernel_threads = 2; // avoid local size 1, see run_kernel ()
+
+    num_elements = round_up_multiple_64 (num_elements, kernel_threads);
+
+    if (vk_kern->local_size_x != (uint32_t) kernel_threads)
+    {
+      if (hc_vkKernelCompile (hashcat_ctx, vk_kern, device_param->vk_module_mp, device_param->vk_module_mp_refl, vk_kern->entrypoint, (uint32_t) kernel_threads, 1) == -1) return -1;
+    }
+
+    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+  }
+
   return 0;
 }
 
@@ -3936,6 +4473,29 @@ int run_kernel_tm (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param)
     const size_t local_work_size[3]  = { kernel_threads,  1, 1 };
 
     if (hc_clEnqueueNDRangeKernel (hashcat_ctx, device_param->opencl_command_queue, cuda_kernel, 1, NULL, global_work_size, local_work_size, 0, NULL, NULL) == -1) return -1;
+  }
+
+  if (device_param->is_vulkan == true)
+  {
+    vk_kernel vk_kern = device_param->vk_kernel_tm;
+
+    for (u32 i = 0; i < 2; i++)
+    {
+      if (device_param->kernel_params_tm[i] == NULL) continue;
+
+      if (hc_vkSetKernelArg (hashcat_ctx, vk_kern, i, (hc_vk_buffer_t *) device_param->kernel_params_tm[i]) == -1) return -1;
+    }
+
+    u64 kernel_threads_vk = kernel_threads;
+
+    if (kernel_threads_vk < 2) kernel_threads_vk = 2; // avoid local size 1, see run_kernel ()
+
+    if (vk_kern->local_size_x != (uint32_t) kernel_threads_vk)
+    {
+      if (hc_vkKernelCompile (hashcat_ctx, vk_kern, device_param->vk_module, device_param->vk_module_refl, vk_kern->entrypoint, (uint32_t) kernel_threads_vk, 1) == -1) return -1;
+    }
+
+    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
   }
 
   return 0;
@@ -4039,6 +4599,44 @@ int run_kernel_amp (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param,
     if (hc_clEnqueueNDRangeKernel (hashcat_ctx, device_param->opencl_command_queue, opencl_kernel, 1, NULL, global_work_size, local_work_size, 0, NULL, NULL) == -1) return -1;
   }
 
+  if (device_param->is_vulkan == true)
+  {
+    vk_kernel vk_kern = device_param->vk_kernel_amp;
+
+    // pointers first (args 0..4), then the two scalars packed at natural alignment
+
+    u8 *pod = (u8 *) device_param->vk_d_kernel_param.host;
+
+    memset (pod, 0, sizeof (u64) * 2);
+
+    memcpy (pod + 0, device_param->kernel_params_amp_buf32 + 5, sizeof (u32));
+    memcpy (pod + 8, device_param->kernel_params_amp_buf64 + 6, sizeof (u64));
+
+    for (u32 i = 0; i < 5; i++)
+    {
+      hc_vk_buffer_t *arg_buf = (hc_vk_buffer_t *) device_param->kernel_params_amp[i];
+
+      if (arg_buf == NULL) continue;
+
+      if (hc_vkSetKernelArg (hashcat_ctx, vk_kern, i, arg_buf) == -1) return -1;
+    }
+
+    if (hc_vkSetKernelArg (hashcat_ctx, vk_kern, 5, &device_param->vk_d_kernel_param) == -1) return -1;
+
+    u64 kernel_threads_vk = kernel_threads;
+
+    if (kernel_threads_vk < 2) kernel_threads_vk = 2; // avoid local size 1, see run_kernel ()
+
+    num_elements = round_up_multiple_64 (num_elements, kernel_threads_vk);
+
+    if (vk_kern->local_size_x != (uint32_t) kernel_threads_vk)
+    {
+      if (hc_vkKernelCompile (hashcat_ctx, vk_kern, device_param->vk_module_amp, device_param->vk_module_amp_refl, vk_kern->entrypoint, (uint32_t) kernel_threads_vk, 1) == -1) return -1;
+    }
+
+    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+  }
+
   return 0;
 }
 
@@ -4106,6 +4704,39 @@ int run_kernel_decompress (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device
     if (hc_clSetKernelArg (hashcat_ctx, opencl_kernel, 3, sizeof (cl_ulong), device_param->kernel_params_decompress[3]) == -1) return -1;
 
     if (hc_clEnqueueNDRangeKernel (hashcat_ctx, device_param->opencl_command_queue, opencl_kernel, 1, NULL, global_work_size, local_work_size, 0, NULL, NULL) == -1) return -1;
+  }
+
+  if (device_param->is_vulkan == true)
+  {
+    vk_kernel vk_kern = device_param->vk_kernel_decompress;
+
+    // three pointer args, then the single scalar packed at offset 0 of the pod buffer
+
+    memcpy (device_param->vk_d_kernel_param.host, device_param->kernel_params_decompress_buf64 + 3, sizeof (u64));
+
+    for (u32 i = 0; i < 3; i++)
+    {
+      hc_vk_buffer_t *arg_buf = (hc_vk_buffer_t *) device_param->kernel_params_decompress[i];
+
+      if (arg_buf == NULL) continue;
+
+      if (hc_vkSetKernelArg (hashcat_ctx, vk_kern, i, arg_buf) == -1) return -1;
+    }
+
+    if (hc_vkSetKernelArg (hashcat_ctx, vk_kern, 3, &device_param->vk_d_kernel_param) == -1) return -1;
+
+    u64 kernel_threads_vk = kernel_threads;
+
+    if (kernel_threads_vk < 2) kernel_threads_vk = 2; // avoid local size 1, see run_kernel ()
+
+    num_elements = round_up_multiple_64 (num_elements, kernel_threads_vk);
+
+    if (vk_kern->local_size_x != (uint32_t) kernel_threads_vk)
+    {
+      if (hc_vkKernelCompile (hashcat_ctx, vk_kern, device_param->vk_module_shared, device_param->vk_module_shared_refl, vk_kern->entrypoint, (uint32_t) kernel_threads_vk, 1) == -1) return -1;
+    }
+
+    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
   }
 
   return 0;
@@ -4225,6 +4856,11 @@ int pcfg_seed_cells (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param
     if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pcfg_cells, CL_TRUE, 0, size, device_param->pcfg_cells_buf, 0, NULL, NULL) == -1) return -1;
   }
 
+  if (device_param->is_vulkan == true)
+  {
+    memcpy (device_param->vk_d_pcfg_cells.host, device_param->pcfg_cells_buf, size);
+  }
+
   return 0;
 }
 
@@ -4283,6 +4919,12 @@ int run_copy (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const
     {
       if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pcfg_cells, CL_TRUE, 0, size, device_param->pcfg_cells_buf, 0, NULL, NULL) == -1) return -1;
       if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pcfg_wmap, CL_TRUE, 0, wsize, device_param->pcfg_wmap_buf, 0, NULL, NULL) == -1) return -1;
+    }
+
+    if (device_param->is_vulkan == true)
+    {
+      memcpy (device_param->vk_d_pcfg_cells.host, device_param->pcfg_cells_buf, size);
+      memcpy (device_param->vk_d_pcfg_wmap.host, device_param->pcfg_wmap_buf, wsize);
     }
   }
 
@@ -4343,6 +4985,19 @@ int run_copy (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const
       if (off)
       {
         if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_comp_buf, CL_TRUE, 0, off * sizeof (u32), device_param->pws_comp, 0, NULL, NULL) == -1) return -1;
+      }
+    }
+    if (device_param->is_vulkan == true)
+    {
+      memcpy (device_param->vk_d_pws_idx.host, device_param->pws_idx, pws_cnt * sizeof (pw_idx_t));
+
+      const pw_idx_t *pw_idx = device_param->pws_idx + pws_cnt;
+
+      const u32 off = pw_idx->off;
+
+      if (off)
+      {
+        memcpy (device_param->vk_d_pws_comp_buf.host, device_param->pws_comp, off * sizeof (u32));
       }
     }
 
@@ -4410,6 +5065,19 @@ int run_copy (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const
         if (off)
         {
           if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_comp_buf, CL_TRUE, 0, off * sizeof (u32), device_param->pws_comp, 0, NULL, NULL) == -1) return -1;
+        }
+      }
+      if (device_param->is_vulkan == true)
+      {
+        memcpy (device_param->vk_d_pws_idx.host, device_param->pws_idx, pws_cnt * sizeof (pw_idx_t));
+
+        const pw_idx_t *pw_idx = device_param->pws_idx + pws_cnt;
+
+        const u32 off = pw_idx->off;
+
+        if (off)
+        {
+          memcpy (device_param->vk_d_pws_comp_buf.host, device_param->pws_comp, off * sizeof (u32));
         }
       }
 
@@ -4510,6 +5178,19 @@ int run_copy (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const
             if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_comp_buf, CL_TRUE, 0, off * sizeof (u32), device_param->pws_comp, 0, NULL, NULL) == -1) return -1;
           }
         }
+        if (device_param->is_vulkan == true)
+        {
+          memcpy (device_param->vk_d_pws_idx.host, device_param->pws_idx, pws_cnt * sizeof (pw_idx_t));
+
+          const pw_idx_t *pw_idx = device_param->pws_idx + pws_cnt;
+
+          const u32 off = pw_idx->off;
+
+          if (off)
+          {
+            memcpy (device_param->vk_d_pws_comp_buf.host, device_param->pws_comp, off * sizeof (u32));
+          }
+        }
 
         if (run_kernel_decompress (hashcat_ctx, device_param, pws_cnt) == -1) return -1;
       }
@@ -4584,6 +5265,19 @@ int run_copy (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const
             if (off)
             {
               if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_comp_buf, CL_TRUE, 0, off * sizeof (u32), device_param->pws_comp, 0, NULL, NULL) == -1) return -1;
+            }
+          }
+          if (device_param->is_vulkan == true)
+          {
+            memcpy (device_param->vk_d_pws_idx.host, device_param->pws_idx, pws_cnt * sizeof (pw_idx_t));
+
+            const pw_idx_t *pw_idx = device_param->pws_idx + pws_cnt;
+
+            const u32 off = pw_idx->off;
+
+            if (off)
+            {
+              memcpy (device_param->vk_d_pws_comp_buf.host, device_param->pws_comp, off * sizeof (u32));
             }
           }
 
@@ -5144,6 +5838,11 @@ static int amp_prepare (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_pa
       {
         if (hc_clEnqueueCopyBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_rules, device_param->opencl_d_rules_c, innerloop_pos * sizeof (kernel_rule_t), 0, innerloop_left * sizeof (kernel_rule_t), 0, NULL, NULL) == -1) return -1;
       }
+
+      if (device_param->is_vulkan == true)
+      {
+        if (hc_vkCopyBuffer (hashcat_ctx, &device_param->vk_d_rules, &device_param->vk_d_rules_c, innerloop_pos * sizeof (kernel_rule_t), 0, innerloop_left * sizeof (kernel_rule_t)) == -1) return -1;
+      }
     }
     else if (user_options_extra->attack_kern == ATTACK_KERN_COMBI)
     {
@@ -5194,6 +5893,11 @@ static int amp_prepare (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_pa
             if (hc_clEnqueueCopyBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_combs, device_param->opencl_d_combs_c, 0, 0, innerloop_left * sizeof (pw_t), 0, NULL, NULL) == -1) return -1;
           }
 
+          if (device_param->is_vulkan == true)
+          {
+            if (hc_vkCopyBuffer (hashcat_ctx, &device_param->vk_d_combs, &device_param->vk_d_combs_c, 0, 0, innerloop_left * sizeof (pw_t)) == -1) return -1;
+          }
+
           innerloop_left_io[0] = innerloop_left;
 
           return 0;
@@ -5234,6 +5938,11 @@ static int amp_prepare (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_pa
         if (device_param->is_opencl == true)
         {
           if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_combs_c, CL_TRUE, 0, combs_size, device_param->combs_buf, 0, NULL, NULL) == -1) return -1;
+        }
+
+        if (device_param->is_vulkan == true)
+        {
+          memcpy (device_param->vk_d_combs_c.host, device_param->combs_buf, combs_size);
         }
       }
       else if (hashconfig->opti_type & OPTI_TYPE_OPTIMIZED_KERNEL)
@@ -5278,6 +5987,11 @@ static int amp_prepare (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_pa
           {
             if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_combs_c, CL_TRUE, 0, innerloop_left * sizeof (pw_t), device_param->combs_buf, 0, NULL, NULL) == -1) return -1;
           }
+
+          if (device_param->is_vulkan == true)
+          {
+            memcpy (device_param->vk_d_combs_c.host, device_param->combs_buf, innerloop_left * sizeof (pw_t));
+          }
         }
       }
     }
@@ -5309,6 +6023,11 @@ static int amp_prepare (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_pa
       if (device_param->is_opencl == true)
       {
         if (hc_clEnqueueCopyBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_bfs, device_param->opencl_d_bfs_c, 0, 0, innerloop_left * sizeof (bf_t), 0, NULL, NULL) == -1) return -1;
+      }
+
+      if (device_param->is_vulkan == true)
+      {
+        if (hc_vkCopyBuffer (hashcat_ctx, &device_param->vk_d_bfs, &device_param->vk_d_bfs_c, 0, 0, innerloop_left * sizeof (bf_t)) == -1) return -1;
       }
     }
   }
@@ -5475,7 +6194,17 @@ static int run_cracker_salt_major (hashcat_ctx_t *hashcat_ctx, hc_device_param_t
 
       if (innerloop_left == 0) continue;
 
-      if (choose_kernel (hashcat_ctx, device_param, highest_pw_len, pws_pos, pws_cnt, fast_iteration, salt_pos, false) == -1) return -1;
+      // vulkan: the launch sequence inside choose_kernel() is dispatched without
+      // blocking between kernels (the backend idles the queue again when results
+      // are read). all other entry points keep blocking semantics.
+
+      if (device_param->is_vulkan == true) ((VK_PTR *) hashcat_ctx->backend_ctx->vk)->async_enabled = 1;
+
+      const int rc_kernel = choose_kernel (hashcat_ctx, device_param, highest_pw_len, pws_pos, pws_cnt, fast_iteration, salt_pos, false);
+
+      if (device_param->is_vulkan == true) ((VK_PTR *) hashcat_ctx->backend_ctx->vk)->async_enabled = 0;
+
+      if (rc_kernel == -1) return -1;
 
       /**
        * benchmark was aborted because too long kernel runtime (slow hashes only)
@@ -5774,7 +6503,15 @@ static int run_cracker_amp_major (hashcat_ctx_t *hashcat_ctx, hc_device_param_t 
       device_param->kernel_param.digests_cnt         = salt_buf->digests_cnt;
       device_param->kernel_param.digests_offset_host = salt_buf->digests_offset;
 
-      if (choose_kernel (hashcat_ctx, device_param, highest_pw_len, pws_pos, pws_cnt, fast_iteration, salt_pos, false) == -1)
+      // vulkan: same async launch window as in run_cracker_salt_major()
+
+      if (device_param->is_vulkan == true) ((VK_PTR *) hashcat_ctx->backend_ctx->vk)->async_enabled = 1;
+
+      const int rc_kernel = choose_kernel (hashcat_ctx, device_param, highest_pw_len, pws_pos, pws_cnt, fast_iteration, salt_pos, false);
+
+      if (device_param->is_vulkan == true) ((VK_PTR *) hashcat_ctx->backend_ctx->vk)->async_enabled = 0;
+
+      if (rc_kernel == -1)
       {
         rc_final = -1;
 
@@ -6181,6 +6918,28 @@ int backend_ctx_init (hashcat_ctx_t *hashcat_ctx)
       // this causes a memleak and an open filehandle but what can we do?
       // hip_close    (hashcat_ctx);
       // hiprtc_close (hashcat_ctx);
+    }
+  }
+
+  /**
+   * Load and map Vulkan library calls, then init Vulkan
+   */
+
+  int rc_vk_init = -1;
+
+  if (user_options->backend_ignore_vulkan == false)
+  {
+    VK_PTR *vk = (VK_PTR *) hcmalloc (sizeof (VK_PTR));
+
+    backend_ctx->vk = vk;
+
+    rc_vk_init = vk_init (hashcat_ctx);
+
+    if (rc_vk_init == -1)
+    {
+      vk_close (hashcat_ctx);
+
+      backend_ctx->vk = NULL;
     }
   }
 
@@ -6616,7 +7375,7 @@ int backend_ctx_init (hashcat_ctx_t *hashcat_ctx)
    * Final checks
    */
 
-  if ((backend_ctx->cuda == NULL) && (backend_ctx->hip == NULL) && (backend_ctx->ocl == NULL) && (backend_ctx->mtl == NULL))
+  if ((backend_ctx->cuda == NULL) && (backend_ctx->hip == NULL) && (backend_ctx->ocl == NULL) && (backend_ctx->mtl == NULL) && (backend_ctx->vk == NULL))
   {
     #if defined (__APPLE__)
     event_log_error (hashcat_ctx, "ATTENTION! No OpenCL, Metal, HIP or CUDA compatible platform found.");
@@ -9805,6 +10564,315 @@ static void backend_ctx_devices_none_reason (hashcat_ctx_t *hashcat_ctx)
   event_log_warning (hashcat_ctx, NULL);
 }
 
+// Vulkan device enumeration. Modeled on the HIP path but far simpler: there is no virtualization,
+// no bridge and no per-API counters in backend_ctx, and the VkInstance is kept inside the first
+// claimed device so that cleanup can find it without a backend_ctx field.
+
+static void backend_ctx_devices_init_vulkan (hashcat_ctx_t *hashcat_ctx, int *backend_devices_idx)
+{
+        backend_ctx_t   *backend_ctx   = hashcat_ctx->backend_ctx;
+  const user_options_t  *user_options  = hashcat_ctx->user_options;
+
+  hc_device_param_t     *devices_param = backend_ctx->devices_param;
+
+  int vulkan_devices_cnt    = 0;
+  int vulkan_devices_active = 0;
+
+  if (backend_ctx->vk == NULL) return;
+
+  VK_PTR *vk = (VK_PTR *) backend_ctx->vk;
+
+  VkApplicationInfo application_info = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "hashcat", .applicationVersion = 0, .apiVersion = VK_API_VERSION_1_1 };
+
+  VkInstanceCreateInfo instance_create_info = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &application_info };
+
+  VkInstance instance = NULL;
+
+  if (vk->vkCreateInstance (&instance_create_info, NULL, &instance) != VK_SUCCESS)
+  {
+    event_log_warning (hashcat_ctx, "Vulkan: vkCreateInstance () failed, ignoring the Vulkan backend.");
+
+    return;
+  }
+
+  // the instance is stored in the first claimed device, destroyed again through it
+
+  VkInstance stored_instance = NULL;
+
+  uint32_t physical_cnt = 0;
+
+  VkPhysicalDevice *physical_devices = NULL;
+
+  if (hc_vkEnumeratePhysicalDevices (hashcat_ctx, instance, &physical_cnt, NULL) == -1)
+  {
+    physical_cnt = 0;
+  }
+
+  if (physical_cnt > 0)
+  {
+    physical_devices = (VkPhysicalDevice *) hccalloc (physical_cnt, sizeof (VkPhysicalDevice));
+
+    if (hc_vkEnumeratePhysicalDevices (hashcat_ctx, instance, &physical_cnt, physical_devices) == -1)
+    {
+      physical_cnt = 0;
+    }
+  }
+
+  for (uint32_t physical_idx = 0; physical_idx < physical_cnt; physical_idx++)
+  {
+    VkPhysicalDevice physical_device = physical_devices[physical_idx];
+
+    // this system's vulkan headers do not expose maxComputeUnits in the core limits, so the
+    // compute unit count comes from the AMD shader core properties extension when the driver
+    // reports it, with a conservative fallback otherwise
+
+    VkPhysicalDeviceProperties p;
+
+    memset (&p, 0, sizeof (p));
+
+    u32 device_processors_query = 0;
+    u32 wavefront_size_query    = 0;
+
+    if (vk->vkGetPhysicalDeviceProperties2 != NULL)
+    {
+      VkPhysicalDeviceShaderCorePropertiesAMD amd_core = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_AMD, .pNext = NULL };
+
+      VkPhysicalDeviceProperties2 p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &amd_core };
+
+      if (hc_vkGetPhysicalDeviceProperties (hashcat_ctx, physical_device, &p) == -1) continue;
+
+      vk->vkGetPhysicalDeviceProperties2 (physical_device, &p2);
+
+      if ((amd_core.shaderEngineCount > 0) && (amd_core.shaderArraysPerEngineCount > 0) && (amd_core.computeUnitsPerShaderArray > 0))
+      {
+        device_processors_query = amd_core.shaderEngineCount * amd_core.shaderArraysPerEngineCount * amd_core.computeUnitsPerShaderArray;
+      }
+
+      if ((amd_core.wavefrontSize >= 8) && (amd_core.wavefrontSize <= 1024))
+      {
+        wavefront_size_query = amd_core.wavefrontSize;
+      }
+    }
+    else
+    {
+      if (hc_vkGetPhysicalDeviceProperties (hashcat_ctx, physical_device, &p) == -1) continue;
+    }
+
+    // skip CPU-only software rasterizers
+
+    char name_lower[HCBUFSIZ_TINY];
+
+    strncpy (name_lower, p.deviceName, HCBUFSIZ_TINY - 1);
+    name_lower[HCBUFSIZ_TINY - 1] = 0;
+
+    for (char *s = name_lower; *s; s++) *s = (char) tolower ((unsigned char) *s);
+
+    if (strstr (name_lower, "llvmpipe")    != NULL) continue;
+    if (strstr (name_lower, "lavapipe")    != NULL) continue;
+    if (strstr (name_lower, "swiftshader") != NULL) continue;
+
+    const u32 device_id = (u32) *backend_devices_idx;
+
+    hc_device_param_t *device_param = &devices_param[*backend_devices_idx];
+
+    device_param->device_id = device_id;
+
+    backend_ctx_physical_device_add (backend_ctx, CL_DEVICE_TYPE_GPU);
+
+    device_param->is_vulkan          = true;
+    device_param->vk_instance        = NULL; // set on the first claimed device
+    device_param->vk_physical_device = physical_device;
+
+    uint32_t queue_family = 0;
+
+    VkDevice vk_device = NULL;
+
+    if (hc_vkCreateDevice (hashcat_ctx, instance, physical_device, &vk_device, &queue_family) == -1)
+    {
+      device_param->skipped = true;
+
+      (*backend_devices_idx)++;
+
+      continue;
+    }
+
+    device_param->vk_device = vk_device;
+
+    vk->vkGetDeviceQueue (vk_device, queue_family, 0, &device_param->vk_queue);
+
+    if (stored_instance == NULL)
+    {
+      device_param->vk_instance = instance;
+
+      stored_instance = instance;
+    }
+
+    // device_name
+
+    char *device_name = (char *) hcmalloc (HCBUFSIZ_TINY);
+
+    strncpy (device_name, p.deviceName, HCBUFSIZ_TINY - 1);
+
+    device_name[HCBUFSIZ_TINY - 1] = 0;
+
+    device_param->device_name = device_name;
+
+    hc_string_trim_leading (device_name);
+
+    hc_string_trim_trailing (device_name);
+
+    // device_processors
+
+    device_param->device_processors = (device_processors_query > 0) ? device_processors_query : 4;
+
+    // device_global_mem, device_maxmem_alloc
+
+    u64 global_mem = 0;
+    u64 max_heap   = 0;
+
+    VkPhysicalDeviceMemoryProperties mem;
+
+    memset (&mem, 0, sizeof (mem));
+
+    vk->vkGetPhysicalDeviceMemoryProperties (physical_device, &mem);
+
+    for (uint32_t heap_idx = 0; heap_idx < mem.memoryHeapCount; heap_idx++)
+    {
+      if ((mem.memoryHeaps[heap_idx].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) || (heap_idx == 0))
+      {
+        if (mem.memoryHeaps[heap_idx].size > max_heap) max_heap = mem.memoryHeaps[heap_idx].size;
+      }
+
+      global_mem += mem.memoryHeaps[heap_idx].size;
+    }
+
+    device_param->device_global_mem          = global_mem;
+    device_param->device_maxmem_alloc        = (max_heap > 0) ? max_heap : global_mem;
+    // free = total: the buffers live in host mapped memory, nobody else draws from this heap
+    device_param->device_available_mem       = global_mem;
+    device_param->device_host_unified_memory = 1; // buffers are host mapped and coherent
+
+    // workgroup size limits
+
+    device_param->device_maxworkgroup_size = MIN (p.limits.maxComputeWorkGroupInvocations, p.limits.maxComputeWorkGroupSize[0]);
+
+    device_param->sm_major = 0;
+    device_param->sm_minor = 0;
+
+    device_param->kernel_exec_timeout = 0;
+
+    // no PCI info under vulkan, leave all zero
+
+    device_param->pcie_domain   = 0;
+    device_param->pcie_bus      = 0;
+    device_param->pcie_device   = 0;
+    device_param->pcie_function = 0;
+
+    // preferred wave width: use the wavefront size when the driver reported it
+
+    device_param->kernel_preferred_wgs_multiple = (wavefront_size_query > 0) ? wavefront_size_query : 64;
+
+    // local memory
+
+    device_param->device_local_mem_size = p.limits.maxComputeSharedMemorySize;
+    device_param->device_local_mem_type = CL_LOCAL;
+
+    device_param->vector_width = 1;
+
+    // vendor id mapping from the PCI vendor id.
+    //
+    // The DEVICE vendor id keeps the real hardware vendor for informational purposes, but the
+    // PLATFORM vendor id stays generic on purpose: the OpenCL kernels switch their ISA specific
+    // paths on VENDOR_ID, and clspv cannot compile the amdgcn builtin paths an AMD vendor id
+    // selects. Generic is what every non-native runtime reports anyway.
+
+    u32 vk_device_vendor_id = VENDOR_ID_GENERIC;
+
+    switch (p.vendorID)
+    {
+      case 0x1002: vk_device_vendor_id = VENDOR_ID_AMD;           break;
+      case 0x10de: vk_device_vendor_id = VENDOR_ID_NV;            break;
+      case 0x8086: vk_device_vendor_id = VENDOR_ID_INTEL_BEIGNET; break;
+      case 0x106b: vk_device_vendor_id = VENDOR_ID_APPLE;         break;
+      default:     vk_device_vendor_id = VENDOR_ID_GENERIC;       break;
+    }
+
+    device_param->opencl_device_vendor_id  = vk_device_vendor_id;
+    device_param->opencl_platform_vendor_id = VENDOR_ID_GENERIC;
+
+    // some attributes have to be hardcoded values because they are used for instance in the build options
+
+    device_param->opencl_device_type = CL_DEVICE_TYPE_GPU;
+
+    // or in the cached kernel checksum
+
+    device_param->opencl_device_version     = "";
+    device_param->opencl_driver_version     = "";
+
+    // or just to make sure they are not NULL
+
+    device_param->opencl_device_vendor     = "";
+    device_param->opencl_device_c_version  = "";
+
+    device_param->use_opencl12 = false;
+    device_param->use_opencl20 = false;
+    device_param->use_opencl30 = false;
+
+    // instruction set
+
+    device_param->has_add   = false;
+    device_param->has_addc  = false;
+    device_param->has_sub   = false;
+    device_param->has_subc  = false;
+    device_param->has_bfe   = false;
+    device_param->has_lop3  = false;
+    device_param->has_mov64 = false;
+    device_param->has_prmt  = false;
+    device_param->has_shfw  = true;
+
+    device_param->spin_damp = 0; // dispatch is blocking, no damper needed
+
+    // skipped
+
+    if (backend_ctx->backend_devices_filter[device_id] == 1)
+    {
+      device_param->skipped = true;
+    }
+
+    #if !defined (__APPLE__)
+    if ((backend_ctx->opencl_device_types_filter & CL_DEVICE_TYPE_GPU) == 0)
+    {
+      device_param->skipped = true;
+    }
+    #endif
+
+    /**
+     * activate device
+     */
+
+    if (device_param->skipped == false)
+    {
+      vulkan_devices_active++;
+    }
+
+    vulkan_devices_cnt++;
+
+    (*backend_devices_idx)++;
+  }
+
+  if (physical_devices != NULL)
+  {
+    hcfree (physical_devices);
+  }
+
+  // destroy the instance when no device claimed it
+
+  if (stored_instance == NULL)
+  {
+    vk->vkDestroyInstance (instance, NULL);
+  }
+}
+
 int backend_ctx_devices_init (hashcat_ctx_t *hashcat_ctx, const int comptime)
 {
   backend_ctx_t *backend_ctx = hashcat_ctx->backend_ctx;
@@ -9847,6 +10915,13 @@ int backend_ctx_devices_init (hashcat_ctx_t *hashcat_ctx, const int comptime)
 
   backend_ctx_devices_init_opencl (hashcat_ctx, &virthost, &virthost_finder, &backend_devices_idx, &bridge_link_device);
 
+  // Vulkan (after every native API, those win over it through the alias logic)
+
+  if ((user_options->backend_ignore_vulkan == false) && (backend_ctx->vk != NULL))
+  {
+    backend_ctx_devices_init_vulkan (hashcat_ctx, &backend_devices_idx);
+  }
+
   // What virtualization resolved the host device to, as a backend device number. It stays 0 when no
   // backend claimed the requested number, which means the number is past the end of the physical
   // device list and no device was created at all.
@@ -9855,8 +10930,51 @@ int backend_ctx_devices_init (hashcat_ctx_t *hashcat_ctx, const int comptime)
 
   // all devices combined go into backend_* variables
 
-  backend_ctx->backend_devices_cnt    = backend_ctx->cuda_devices_cnt    + backend_ctx->hip_devices_cnt    + backend_ctx->metal_devices_cnt    + backend_ctx->opencl_devices_cnt;
-  backend_ctx->backend_devices_active = backend_ctx->cuda_devices_active + backend_ctx->hip_devices_active + backend_ctx->metal_devices_active + backend_ctx->opencl_devices_active;
+  int vulkan_devices_cnt    = 0;
+  int vulkan_devices_active = 0;
+
+  for (int vulkan_scan_idx = 0; vulkan_scan_idx < backend_devices_idx; vulkan_scan_idx++)
+  {
+    if (devices_param[vulkan_scan_idx].is_vulkan == false) continue;
+
+    vulkan_devices_cnt++;
+
+    if (devices_param[vulkan_scan_idx].skipped == false) vulkan_devices_active++;
+  }
+
+  backend_ctx->backend_devices_cnt    = backend_ctx->cuda_devices_cnt    + backend_ctx->hip_devices_cnt    + backend_ctx->metal_devices_cnt    + backend_ctx->opencl_devices_cnt    + vulkan_devices_cnt;
+  backend_ctx->backend_devices_active = backend_ctx->cuda_devices_active + backend_ctx->hip_devices_active + backend_ctx->metal_devices_active + backend_ctx->opencl_devices_active + vulkan_devices_active;
+
+  // Vulkan Info banner for hashcat -I. terminal.c has no vulkan section and is not this
+  // change's file to edit, so the listing is printed here instead, mirroring the HIP section
+  // of backend_info () in terminal.c
+
+  if ((user_options->backend_info > 0) && (vulkan_devices_cnt > 0))
+  {
+    event_log_info (hashcat_ctx, NULL);
+    event_log_info (hashcat_ctx, "Vulkan Info:");
+    event_log_info (hashcat_ctx, "===========");
+    event_log_info (hashcat_ctx, NULL);
+
+    for (int vulkan_info_idx = 0; vulkan_info_idx < backend_devices_idx; vulkan_info_idx++)
+    {
+      const hc_device_param_t *device_param = &devices_param[vulkan_info_idx];
+
+      if (device_param->is_vulkan == false) continue;
+
+      event_log_info (hashcat_ctx, "Backend Device ID #%02u", device_param->device_id + 1);
+      event_log_info (hashcat_ctx, "  Name...........: %s", device_param->device_name);
+      event_log_info (hashcat_ctx, "  Processor(s)...: %u", device_param->device_processors);
+      event_log_info (hashcat_ctx, "  Preferred.Thrd.: %u", device_param->kernel_preferred_wgs_multiple);
+      event_log_info (hashcat_ctx, "  Clock..........: %u", 0);
+      event_log_info (hashcat_ctx, "  Memory.Total...: %" PRIu64 " MB", device_param->device_global_mem / 1024 / 1024);
+      event_log_info (hashcat_ctx, "  Memory.Free....: %" PRIu64 " MB", device_param->device_global_mem / 1024 / 1024); // free = total, host mapped memory
+      event_log_info (hashcat_ctx, "  Memory.Unified.: %d", 1);
+      event_log_info (hashcat_ctx, "  Local.Memory...: %" PRIu64 " KB", device_param->device_local_mem_size / 1024);
+      event_log_info (hashcat_ctx, "  PCI.Addr.BDFe..: %04x:%02x:%02x.%u", (u16) device_param->pcie_domain, device_param->pcie_bus, device_param->pcie_device, device_param->pcie_function);
+      event_log_info (hashcat_ctx, NULL);
+    }
+  }
 
   #if defined (__APPLE__)
   // disable Metal devices if at least one OpenCL device is enabled
@@ -10563,6 +11681,25 @@ void backend_ctx_devices_destroy (hashcat_ctx_t *hashcat_ctx)
       hcfree (device_param->gcnArchName);
     }
 
+    if (device_param->is_vulkan == true)
+    {
+      VK_PTR *vk = (VK_PTR *) backend_ctx->vk;
+
+      if ((vk != NULL) && (device_param->vk_device != NULL))
+      {
+        vk->vkDestroyDevice (device_param->vk_device, NULL);
+
+        device_param->vk_device = NULL;
+      }
+
+      if ((vk != NULL) && (device_param->vk_instance != NULL))
+      {
+        vk->vkDestroyInstance (device_param->vk_instance, NULL);
+
+        device_param->vk_instance = NULL;
+      }
+    }
+
     #if defined (__APPLE__)
     if (device_param->is_metal == true)
     {
@@ -11210,10 +12347,195 @@ static cl_program opencl_program_borrow (hashcat_ctx_t *hashcat_ctx, hc_device_p
   return NULL;
 }
 
+#if !defined (_WIN)
+#include <sys/wait.h>
+#include <fcntl.h>
+#endif
+
+// Compile an OpenCL C kernel to SPIR-V with clspv. The compiler runs as an external process with
+// stderr redirected into a log file, so a failure can be shown verbatim.
+
+#if !defined (_WIN)
+static bool vk_clspv_compile (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const char *kernel_source, const char *source_file, const char *build_options_buf, const char *cl_path, const char *opencl_dir, const char *spv_path)
+{
+  const user_options_t *user_options = hashcat_ctx->user_options;
+
+  // write the source out
+
+  char source_tmp[300] = { 0 };
+
+  snprintf (source_tmp, sizeof (source_tmp), "%s.cl", spv_path);
+
+  FILE *fp = fopen (source_tmp, "wb");
+
+  if (fp == NULL)
+  {
+    event_log_error (hashcat_ctx, "%s: %s", source_tmp, strerror (errno));
+
+    return false;
+  }
+
+  fwrite (kernel_source, 1, strlen (kernel_source), fp);
+
+  fclose (fp);
+
+  // build argv
+
+  const size_t opts_len = strlen (build_options_buf);
+
+  const size_t argv_max = (opts_len / 2) + 24;
+
+  char **argv = (char **) hccalloc (argv_max, sizeof (char *));
+
+  int argc = 0;
+
+  argv[argc++] = (char *) cl_path;
+  argv[argc++] = (char *) "-I";
+  argv[argc++] = (char *) opencl_dir;
+
+  hc_asprintf (&argv[argc++], "-DINCLUDE_PATH=%s", opencl_dir);
+
+  argv[argc++] = (char *) "-DXM2S(x)=#x";
+  argv[argc++] = (char *) "-DM2S(x)=XM2S(x)";
+  argv[argc++] = (char *) "-DKERNEL_STATIC";
+
+  // lets kernel sources tell the vulkan build apart (see m01800-optimized.cl)
+
+  argv[argc++] = (char *) "-DIS_VULKAN";
+
+  // keep plain-old-data kernel arguments out of the push constant interface and cluster
+  // them into one trailing storage buffer instead: that trailing buffer is the slot we
+  // bind device_param->vk_d_kernel_param into for the scalar arguments
+
+  argv[argc++] = (char *) "--cluster-pod-kernel-args";
+
+  const char *vk_opt = getenv ("HASHCAT_VK_CLSPV_OPTS");
+
+  if (vk_opt != NULL)
+  {
+    // tokenized the same way as build options below; e.g. HASHCAT_VK_CLSPV_OPTS="-O 0"
+
+    char *vk_opts_copy = hcstrdup (vk_opt);
+
+    char *saveptr2 = NULL;
+
+    for (char *tok = strtok_r (vk_opts_copy, " \t", &saveptr2); (tok != NULL) && (argc < ((int) argv_max - 6)); tok = strtok_r ((char *) NULL, " \t", &saveptr2))
+    {
+      argv[argc++] = tok;
+    }
+  }
+
+  // the generic build options appended verbatim, tokenized on whitespace
+
+  char *opts = hcstrdup (build_options_buf);
+
+  char *saveptr = NULL;
+
+  for (char *tok = strtok_r (opts, " \t", &saveptr); (tok != NULL) && (argc < ((int) argv_max - 6)); tok = strtok_r ((char *) NULL, " \t", &saveptr))
+  {
+    argv[argc++] = tok;
+  }
+
+  argv[argc++] = (char *) "-o";
+  argv[argc++] = (char *) spv_path;
+  argv[argc++] = (char *) source_tmp;
+  argv[argc] = NULL;
+
+  if (getenv ("HASHCAT_VK_DEBUG") != NULL)
+  {
+    fprintf (stderr, "[vk] compile:");
+
+    for (int i = 0; argv[i]; i++) fprintf (stderr, " %s", argv[i]);
+
+    fprintf (stderr, "\n[vk] keeping %s and %s\n", spv_path, source_tmp);
+  }
+
+  char log_path[300] = { 0 };
+
+  snprintf (log_path, sizeof (log_path), "%s.log", spv_path);
+
+  int log_fd = open (log_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+  pid_t pid = fork ();
+
+  if (pid == -1)
+  {
+    event_log_error (hashcat_ctx, "fork (): %s", strerror (errno));
+
+    if (log_fd != -1) close (log_fd);
+
+    hcfree (opts);
+    hcfree (argv);
+
+    unlink (source_tmp);
+
+    return false;
+  }
+
+  if (pid == 0)
+  {
+    if (log_fd != -1) dup2 (log_fd, 2);
+
+    execvp (argv[0], argv);
+
+    _exit (127);
+  }
+
+  if (log_fd != -1) close (log_fd);
+
+  int status = 0;
+
+  waitpid (pid, &status, 0);
+
+  hcfree (opts);
+  hcfree (argv);
+
+  if (getenv ("HASHCAT_VK_DEBUG") == NULL) unlink (source_tmp);
+
+  const bool failed = ((!WIFEXITED (status)) || (WEXITSTATUS (status) != 0));
+
+  struct stat st;
+
+  memset (&st, 0, sizeof (st));
+
+  if (stat (spv_path, &st) != 0) st.st_size = 0;
+
+  if (failed || (st.st_size == 0))
+  {
+    // show whatever the compiler had to say
+
+    HCFILE lfp;
+
+    if (hc_fopen (&lfp, log_path, "rb") == true)
+    {
+      char log_buf[8192];
+
+      const size_t n = hc_fread (log_buf, 1, sizeof (log_buf) - 1, &lfp);
+
+      hc_fclose (&lfp);
+
+      log_buf[n] = 0;
+
+      if (n > 0) puts (log_buf);
+    }
+
+      event_log_error (hashcat_ctx, "* Device #%u: Kernel %s build failed.", device_param->device_id + 1, filename_from_filepath ((char *) source_file));
+
+    unlink (log_path);
+
+    return false;
+  }
+
+  unlink (log_path);
+
+  return true;
+}
+#endif // !_WIN
+
 #if defined (__APPLE__)
-static bool load_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const char *kernel_name, char *source_file, char *cached_file, const char *build_options_buf, const bool cache_disable, cl_program *opencl_program, CUmodule *cuda_module, hipModule_t *hip_module, mtl_library *metal_library)
+static bool load_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const char *kernel_name, char *source_file, char *cached_file, const char *build_options_buf, const bool cache_disable, cl_program *opencl_program, CUmodule *cuda_module, hipModule_t *hip_module, mtl_library *metal_library, vk_program *vk_module, hc_vk_refl_t **vk_refl)
 #else
-static bool load_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const char *kernel_name, char *source_file, char *cached_file, const char *build_options_buf, const bool cache_disable, cl_program *opencl_program, CUmodule *cuda_module, hipModule_t *hip_module, MAYBE_UNUSED void *metal_library)
+static bool load_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const char *kernel_name, char *source_file, char *cached_file, const char *build_options_buf, const bool cache_disable, cl_program *opencl_program, CUmodule *cuda_module, hipModule_t *hip_module, MAYBE_UNUSED void *metal_library, MAYBE_UNUSED vk_program *vk_module, MAYBE_UNUSED hc_vk_refl_t **vk_refl)
 #endif
 {
   const backend_ctx_t   *backend_ctx   = hashcat_ctx->backend_ctx;
@@ -11221,7 +12543,62 @@ static bool load_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_p
   const user_options_t  *user_options  = hashcat_ctx->user_options;
   const folder_config_t *folder_config = hashcat_ctx->folder_config;
 
+  // hand-written native Vulkan shaders: when enabled and a matching module
+  // exists for this kernel, it replaces the clspv-translated one entirely
+
   bool cached = true;
+
+  bool use_native_vulkan = false;
+
+  char native_vulkan_path[300] = { 0 };
+
+  #if !defined (_WIN)
+  if ((device_param->is_vulkan == true) && (user_options->native_vulkan == true))
+  {
+    const char *stem = filename_from_filepath (source_file);
+
+    const size_t stem_len = strlen (stem);
+
+    if (stem_len > 3 && strcmp (stem + stem_len - 3, ".cl") == 0)
+    {
+      char stem_base[256] = { 0 };
+
+      memcpy (stem_base, stem, stem_len - 3);
+
+      snprintf (native_vulkan_path, sizeof (native_vulkan_path), "%s/native/%s.vksprv", folder_config->cpath_real, stem_base);
+
+      if (hc_path_read (native_vulkan_path) == true)
+      {
+        use_native_vulkan = true;
+
+        // keep the native build in a separate cache file so that toggling the
+        // option never mixes translated and native modules
+
+        const size_t cf_len = strlen (cached_file);
+
+        if (cf_len > 7 && strcmp (cached_file + cf_len - 7, ".kernel") == 0)
+        {
+          memmove (cached_file + cf_len - 7 + 4, cached_file + cf_len - 7, 8); // ".kernel" + nul
+
+          memcpy (cached_file + cf_len - 7, ".nvk", 4);
+        }
+
+        // rebuild when the shader source is newer than the cache
+
+        if (cached == true)
+        {
+          struct stat s_native;
+          struct stat s_cache;
+
+          if (stat (native_vulkan_path, &s_native) == 0 && stat (cached_file, &s_cache) == 0)
+          {
+            if (s_native.st_mtime > s_cache.st_mtime) cached = false;
+          }
+        }
+      }
+    }
+  }
+  #endif
 
   if (cache_disable == true)
   {
@@ -11670,6 +13047,193 @@ static bool load_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_p
     }
     #endif // __APPLE__
 
+    #if !defined (_WIN)
+    if (device_param->is_vulkan == true && use_native_vulkan == true)
+    {
+      // hand-written native shader: the file already contains final SPIR-V,
+      // no translation step is needed
+
+      size_t spirv_len_buf = 0;
+
+      char  *spirv_buf = NULL;
+
+      size_t *spirv_lengths = &spirv_len_buf;
+
+      char **spirv_sources = &spirv_buf;
+
+      if (read_kernel_binary (hashcat_ctx, native_vulkan_path, spirv_lengths, spirv_sources) == false) return false;
+
+      hc_vk_refl_t *refl_tmp = NULL;
+
+      if (hc_vkProgramCreate (hashcat_ctx, device_param->vk_device, spirv_buf, spirv_len_buf, vk_module, &refl_tmp) == -1)
+      {
+        hcfree (spirv_buf);
+
+        return false;
+      }
+
+      if (cache_disable == false)
+      {
+        const size_t total = 8 + spirv_len_buf;
+
+        char *cached_buf = (char *) hcmalloc (total);
+
+        memcpy (cached_buf, "HCVK", 4);
+
+        u32 len32 = (u32) spirv_len_buf;
+
+        memcpy (cached_buf + 4, &len32, sizeof (u32));
+
+        memcpy (cached_buf + 8, spirv_buf, spirv_len_buf);
+
+        write_kernel_binary (hashcat_ctx, cached_file, cached_buf, total);
+
+        hcfree (cached_buf);
+      }
+
+      *vk_refl = refl_tmp;
+
+      hcfree (spirv_buf);
+
+      #if defined (DEBUG)
+      event_log_info (hashcat_ctx, "* Device #%u: Kernel %s loaded from native Vulkan shader.", device_param->device_id + 1, source_file);
+      event_log_info (hashcat_ctx, NULL);
+      #endif
+    }
+    else if (device_param->is_vulkan == true)
+    {
+      const char *clspv = getenv ("HASHCAT_CLSPV");
+
+      char clspv_home_path[300] = { 0 };
+      char clspv_beside_path[300] = { 0 };
+
+      #if defined (__linux__)
+      // prefer a clspv shipped next to the executable (portable builds), then
+      // a locally built one, then the distro one
+      if ((clspv == NULL) || (clspv[0] == 0))
+      {
+        ssize_t exe_len = readlink ("/proc/self/exe", clspv_beside_path, sizeof (clspv_beside_path) - strlen ("clspv") - 1);
+
+        if (exe_len > 0)
+        {
+          char *slash = strrchr (clspv_beside_path, '/');
+
+          if (slash != NULL)
+          {
+            slash[1] = '\0';
+
+            strcat (clspv_beside_path, "clspv");
+
+            if (access (clspv_beside_path, X_OK) == 0)
+            {
+              clspv = clspv_beside_path;
+            }
+          }
+        }
+      }
+
+      if ((clspv == NULL) || (clspv[0] == 0))
+      {
+        const char *home = getenv ("HOME");
+
+        const char *clspv_candidates[4] =
+        {
+          "/usr/local/bin/clspv",
+          "/opt/clspv/build/bin/clspv",
+          NULL,
+          NULL,
+        };
+
+        if (home != NULL)
+        {
+          snprintf (clspv_home_path, sizeof (clspv_home_path), "%s/opt/clspv-stable/build/bin/clspv", home);
+
+          clspv_candidates[2] = clspv_home_path;
+        }
+
+        for (size_t i = 0; i < sizeof (clspv_candidates) / sizeof (clspv_candidates[0]); i++)
+        {
+          const char *cand = clspv_candidates[i];
+
+          if ((cand != NULL) && (access (cand, X_OK) == 0))
+          {
+            clspv = cand;
+
+            break;
+          }
+        }
+      }
+      #endif
+
+      if ((clspv == NULL) || (clspv[0] == 0)) clspv = "/usr/bin/clspv";
+
+      const char *opencl_dir = folder_config->cpath_real;
+
+      if ((opencl_dir == NULL) || (opencl_dir[0] == 0)) opencl_dir = "./OpenCL";
+
+      char spv_path[300] = { 0 };
+
+      snprintf (spv_path, sizeof (spv_path), "%s.spv", cached_file);
+
+      if (vk_clspv_compile (hashcat_ctx, device_param, kernel_sources[0], source_file, build_options_buf, clspv, opencl_dir, spv_path) == false) return false;
+
+      // read the SPIR-V back in
+
+      size_t spirv_len_buf = 0;
+
+      char  *spirv_buf = NULL;
+
+      size_t *spirv_lengths = &spirv_len_buf;
+
+      char **spirv_sources = &spirv_buf;
+
+      if (read_kernel_binary (hashcat_ctx, spv_path, spirv_lengths, spirv_sources) == false)
+      {
+        unlink (spv_path);
+
+        return false;
+      }
+
+      hc_vk_refl_t *refl_tmp = NULL;
+
+      if (hc_vkProgramCreate (hashcat_ctx, device_param->vk_device, spirv_buf, spirv_len_buf, vk_module, &refl_tmp) == -1)
+      {
+        hcfree (spirv_buf);
+
+        unlink (spv_path);
+
+        return false;
+      }
+
+      if (cache_disable == false)
+      {
+        // prefix with our own header so that an OpenCL cache file is never mistaken for SPIR-V
+
+        const size_t total = 8 + spirv_len_buf;
+
+        char *cached_buf = (char *) hcmalloc (total);
+
+        memcpy (cached_buf, "HCVK", 4);
+
+        u32 len32 = (u32) spirv_len_buf;
+
+        memcpy (cached_buf + 4, &len32, sizeof (u32));
+
+        memcpy (cached_buf + 8, spirv_buf, spirv_len_buf);
+
+        write_kernel_binary (hashcat_ctx, cached_file, cached_buf, total);
+
+        hcfree (cached_buf);
+      }
+
+      *vk_refl = refl_tmp;
+
+      hcfree (spirv_buf);
+
+      unlink (spv_path);
+    }
+    #endif
+
     if (device_param->is_opencl == true)
     {
       size_t build_log_size = 0;
@@ -11894,6 +13458,37 @@ static bool load_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_p
     }
     #endif
 
+    #if !defined (_WIN)
+    if (device_param->is_vulkan == true)
+    {
+      // our cache files carry an "HCVK" header + u32 length in front of the SPIR-V
+
+      if ((kernel_lengths[0] < 8) || (memcmp (kernel_sources[0], "HCVK", 4) != 0))
+      {
+        event_log_error (hashcat_ctx, "* Device #%u: Kernel %s is not a hashcat Vulkan cache file.", device_param->device_id + 1, filename_from_filepath (cached_file));
+
+        return false;
+      }
+
+      u32 spirv_len = 0;
+
+      memcpy (&spirv_len, kernel_sources[0] + 4, sizeof (u32));
+
+      if ((spirv_len == 0) || ((size_t) spirv_len > (kernel_lengths[0] - 8)))
+      {
+        event_log_error (hashcat_ctx, "* Device #%u: Kernel %s has a corrupted Vulkan cache header.", device_param->device_id + 1, filename_from_filepath (cached_file));
+
+        return false;
+      }
+
+      hc_vk_refl_t *refl_tmp = NULL;
+
+      if (hc_vkProgramCreate (hashcat_ctx, device_param->vk_device, kernel_sources[0] + 8, spirv_len, vk_module, &refl_tmp) == -1) return false;
+
+      *vk_refl = refl_tmp;
+    }
+    #endif
+
     if (device_param->is_opencl == true)
     {
       if (hc_clCreateProgramWithBinary (hashcat_ctx, device_param->opencl_context, 1, &device_param->opencl_device, kernel_lengths, (const unsigned char **) kernel_sources, NULL, opencl_program) == -1) return false;
@@ -11905,6 +13500,76 @@ static bool load_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_p
   hcfree (kernel_sources[0]);
 
   return true;
+}
+
+// Vulkan kernel slots. hc_vkKernelInit () creates the fixed objects once per slot and
+// hc_vkKernelCompile () builds (or rebuilds) the pipeline with a specialized local size.
+
+static u32 vk_default_lsz (const hc_device_param_t *device_param);
+
+static int backend_session_setup_vulkan_kernel_create (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, vk_program program, hc_vk_refl_t *refl, const char *entrypoint, vk_kernel *kernel_slot)
+{
+  const u32 lsz = vk_default_lsz (device_param);
+
+  if (*kernel_slot == NULL)
+  {
+    if (hc_vkKernelInit (hashcat_ctx, device_param->vk_device, device_param->vk_physical_device, kernel_slot) == -1) return -2;
+  }
+
+  if (hc_vkKernelCompile (hashcat_ctx, *kernel_slot, program, refl, entrypoint, lsz, 1) == -1) return -1;
+
+  return 0;
+}
+
+#define VK_SETUP_KERNEL(KSUF, WSUF, PROG, REFL, ENTRY)                                                                                      \
+do {                                                                                                                              \
+  const int rc_vulkan_kernel = backend_session_setup_vulkan_kernel_create (hashcat_ctx, device_param, (PROG), (REFL), (ENTRY), &device_param->vk_kernel##KSUF); \
+                                                                                                                                   \
+  if (rc_vulkan_kernel == -2)                                                                                                     \
+  {                                                                                                                               \
+    event_log_warning (hashcat_ctx, "* Device #%u: Kernel %s create failed.", device_param->device_id + 1, ENTRY);                \
+                                                                                                                                   \
+    device_param->skipped_warning = true;                                                                                         \
+                                                                                                                                   \
+    return -2;                                                                                                                    \
+  }                                                                                                                               \
+                                                                                                                                   \
+  if (rc_vulkan_kernel == -1) return -1;                                                                                          \
+                                                                                                                                  \
+  device_param->kernel_wgs##WSUF                     = lsz;                                                                      \
+  device_param->kernel_local_mem_size##WSUF          = 0;                                                                        \
+  device_param->kernel_dynamic_local_mem_size##WSUF  = device_param->device_local_mem_size;                                      \
+  device_param->kernel_preferred_wgs_multiple##WSUF  = lsz;                                                                      \
+} while (0)
+
+static u32 vk_default_lsz (const hc_device_param_t *device_param)
+{
+  u32 lsz = 64;
+
+  if (device_param->kernel_threads_max > 0) lsz = MIN (lsz, device_param->kernel_threads_max);
+
+  if ((device_param->device_maxworkgroup_size > 0) && ((u32) device_param->device_maxworkgroup_size < lsz)) lsz = (u32) device_param->device_maxworkgroup_size;
+
+  if (lsz == 0) lsz = 1;
+
+  return lsz;
+}
+
+static int backend_session_setup_vulkan_kernel_shared (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param)
+{
+  const u32 lsz = vk_default_lsz (device_param);
+
+  VK_SETUP_KERNEL (_memset, _memset,        device_param->vk_module_shared, device_param->vk_module_shared_refl, "gpu_memset");
+  VK_SETUP_KERNEL (_bzero, _bzero,         device_param->vk_module_shared, device_param->vk_module_shared_refl, "gpu_bzero");
+  VK_SETUP_KERNEL (_atinit, _atinit,        device_param->vk_module_shared, device_param->vk_module_shared_refl, "gpu_atinit");
+  VK_SETUP_KERNEL (_decompress, _decompress,    device_param->vk_module_shared, device_param->vk_module_shared_refl, "gpu_decompress");
+  VK_SETUP_KERNEL (_utf8toutf16le, _utf8toutf16le, device_param->vk_module_shared, device_param->vk_module_shared_refl, "gpu_utf8_to_utf16");
+
+  // apple hack, but perhaps also an alternative for other vendors
+
+  if (device_param->kernel_preferred_wgs_multiple == 0) device_param->kernel_preferred_wgs_multiple = device_param->kernel_preferred_wgs_multiple_bzero;
+
+  return 0;
 }
 
 static int backend_session_setup_cuda_kernel_shared (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param)
@@ -15063,6 +16728,198 @@ static int backend_session_setup_opencl_kernel_types (hashcat_ctx_t *hashcat_ctx
   return 0;
 }
 
+static int backend_session_setup_vulkan_kernel_types (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, int kern_type)
+{
+  const hashconfig_t   *hashconfig   = hashcat_ctx->hashconfig;
+  const user_options_t *user_options = hashcat_ctx->user_options;
+
+  char kernel_name[64] = { 0 };
+
+  const u32 lsz = vk_default_lsz (device_param);
+
+  vk_program program_main = device_param->vk_module;
+
+  if (hashconfig->attack_exec == ATTACK_EXEC_INSIDE_KERNEL)
+  {
+    if (hashconfig->opti_type & OPTI_TYPE_SINGLE_HASH)
+    {
+      if (hashconfig->opti_type & OPTI_TYPE_OPTIMIZED_KERNEL)
+      {
+        snprintf (kernel_name, sizeof (kernel_name), "m%05u_s%02d", kern_type, 4);
+        VK_SETUP_KERNEL (1, 1, program_main, device_param->vk_module_refl, kernel_name);
+
+        snprintf (kernel_name, sizeof (kernel_name), "m%05u_s%02d", kern_type, 8);
+        VK_SETUP_KERNEL (2, 2, program_main, device_param->vk_module_refl, kernel_name);
+
+        snprintf (kernel_name, sizeof (kernel_name), "m%05u_s%02d", kern_type, 16);
+        VK_SETUP_KERNEL (3, 3, program_main, device_param->vk_module_refl, kernel_name);
+      }
+      else
+      {
+        snprintf (kernel_name, sizeof (kernel_name), "m%05u_sxx", kern_type);
+        VK_SETUP_KERNEL (4, 4, program_main, device_param->vk_module_refl, kernel_name);
+      }
+    }
+    else
+    {
+      if (hashconfig->opti_type & OPTI_TYPE_OPTIMIZED_KERNEL)
+      {
+        snprintf (kernel_name, sizeof (kernel_name), "m%05u_m%02d", kern_type, 4);
+        VK_SETUP_KERNEL (1, 1, program_main, device_param->vk_module_refl, kernel_name);
+
+        snprintf (kernel_name, sizeof (kernel_name), "m%05u_m%02d", kern_type, 8);
+        VK_SETUP_KERNEL (2, 2, program_main, device_param->vk_module_refl, kernel_name);
+
+        snprintf (kernel_name, sizeof (kernel_name), "m%05u_m%02d", kern_type, 16);
+        VK_SETUP_KERNEL (3, 3, program_main, device_param->vk_module_refl, kernel_name);
+      }
+      else
+      {
+        snprintf (kernel_name, sizeof (kernel_name), "m%05u_mxx", kern_type);
+        VK_SETUP_KERNEL (4, 4, program_main, device_param->vk_module_refl, kernel_name);
+      }
+    }
+
+    if (user_options->slow_candidates == true)
+    {
+    }
+    else
+    {
+      if (user_options->attack_mode == ATTACK_MODE_BF)
+      {
+        if (hashconfig->opts_type & OPTS_TYPE_TM_KERNEL)
+        {
+          snprintf (kernel_name, sizeof (kernel_name), "m%05u_tm", kern_type);
+          VK_SETUP_KERNEL (_tm, _tm, program_main, device_param->vk_module_refl, kernel_name);
+        }
+      }
+    }
+  }
+  else
+  {
+    // kernel1: m%05u_init
+
+    snprintf (kernel_name, sizeof (kernel_name), "m%05u_init", kern_type);
+    VK_SETUP_KERNEL (1, 1, program_main, device_param->vk_module_refl, kernel_name);
+
+    // kernel2: m%05u_loop
+
+    snprintf (kernel_name, sizeof (kernel_name), "m%05u_loop", kern_type);
+    VK_SETUP_KERNEL (2, 2, program_main, device_param->vk_module_refl, kernel_name);
+
+    // kernel3: m%05u_comp
+
+    snprintf (kernel_name, sizeof (kernel_name), "m%05u_comp", kern_type);
+    VK_SETUP_KERNEL (3, 3, program_main, device_param->vk_module_refl, kernel_name);
+
+    if (hashconfig->opts_type & OPTS_TYPE_LOOP_PREPARE)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "m%05u_loop_prepare", kern_type);
+      VK_SETUP_KERNEL (2p, 2p, program_main, device_param->vk_module_refl, kernel_name);
+    }
+
+    if (hashconfig->opts_type & OPTS_TYPE_LOOP_EXTENDED)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "m%05u_loop_extended", kern_type);
+      VK_SETUP_KERNEL (2e, 2e, program_main, device_param->vk_module_refl, kernel_name);
+    }
+
+    if (hashconfig->opts_type & OPTS_TYPE_HOOK12)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "m%05u_hook12", kern_type);
+      VK_SETUP_KERNEL (12, 12, program_main, device_param->vk_module_refl, kernel_name);
+    }
+
+    if (hashconfig->opts_type & OPTS_TYPE_HOOK23)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "m%05u_hook23", kern_type);
+      VK_SETUP_KERNEL (23, 23, program_main, device_param->vk_module_refl, kernel_name);
+    }
+
+    if (hashconfig->opts_type & OPTS_TYPE_INIT2)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "m%05u_init2", kern_type);
+      VK_SETUP_KERNEL (_init2, _init2, program_main, device_param->vk_module_refl, kernel_name);
+    }
+
+    if (hashconfig->opts_type & OPTS_TYPE_LOOP2_PREPARE)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "m%05u_loop2_prepare", kern_type);
+      VK_SETUP_KERNEL (_loop2p, _loop2p, program_main, device_param->vk_module_refl, kernel_name);
+    }
+
+    if (hashconfig->opts_type & OPTS_TYPE_LOOP2)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "m%05u_loop2", kern_type);
+      VK_SETUP_KERNEL (_loop2, _loop2, program_main, device_param->vk_module_refl, kernel_name);
+    }
+
+    if (hashconfig->opts_type & OPTS_TYPE_AUX1)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "m%05u_aux1", kern_type);
+      VK_SETUP_KERNEL (_aux1, _aux1, program_main, device_param->vk_module_refl, kernel_name);
+    }
+
+    if (hashconfig->opts_type & OPTS_TYPE_AUX2)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "m%05u_aux2", kern_type);
+      VK_SETUP_KERNEL (_aux2, _aux2, program_main, device_param->vk_module_refl, kernel_name);
+    }
+
+    if (hashconfig->opts_type & OPTS_TYPE_AUX3)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "m%05u_aux3", kern_type);
+      VK_SETUP_KERNEL (_aux3, _aux3, program_main, device_param->vk_module_refl, kernel_name);
+    }
+
+    if (hashconfig->opts_type & OPTS_TYPE_AUX4)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "m%05u_aux4", kern_type);
+      VK_SETUP_KERNEL (_aux4, _aux4, program_main, device_param->vk_module_refl, kernel_name);
+    }
+  }
+
+  // MP start
+
+  if (user_options->slow_candidates == true)
+  {
+  }
+  else
+  {
+    if (user_options->attack_mode == ATTACK_MODE_BF)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "l_markov");
+      VK_SETUP_KERNEL (_mp_l, _mp_l, device_param->vk_module_mp, device_param->vk_module_mp_refl, "l_markov");
+
+      snprintf (kernel_name, sizeof (kernel_name), "r_markov");
+      VK_SETUP_KERNEL (_mp_r, _mp_r, device_param->vk_module_mp, device_param->vk_module_mp_refl, "r_markov");
+    }
+    else if (user_options->attack_mode == ATTACK_MODE_HYBRID)
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "C_markov");
+      VK_SETUP_KERNEL (_mp, _mp, device_param->vk_module_mp, device_param->vk_module_mp_refl, "C_markov");
+    }
+  }
+
+  if (user_options->slow_candidates == true)
+  {
+  }
+  else
+  {
+    if (hashconfig->attack_exec == ATTACK_EXEC_INSIDE_KERNEL)
+    {
+      // nothing to do
+    }
+    else
+    {
+      snprintf (kernel_name, sizeof (kernel_name), "amp");
+      VK_SETUP_KERNEL (_amp, _amp, device_param->vk_module_amp, device_param->vk_module_amp_refl, "amp");
+    }
+  }
+
+  return 0;
+}
+
 void backend_session_context_reset (hashcat_ctx_t *hashcat_ctx)
 {
   // workaround for context bug (CUDA)
@@ -15157,6 +17014,17 @@ static u32 backend_device_sharers (const backend_ctx_t *backend_ctx, const hc_de
 
   return result;
 }
+
+#define HC_VK_CREATEBUFFER(size, buf_name)                                                                                             \
+  if (hc_vkBufferAlloc (hashcat_ctx, device_param->vk_device, device_param->vk_physical_device, &device_param->vk_d_##buf_name, (VkDeviceSize) (size)) == -1) return -1
+
+// vulkan buffers are persistently mapped and host coherent, so an "upload" is a memcpy
+
+#define HC_VK_UPLOAD(buf_name, src, size)                                                                                              \
+  memcpy ((void *) device_param->vk_d_##buf_name.host, (src), (size))
+
+#define HC_VK_FREEBUFFER(buf_name)                                                                                                     \
+  hc_vkBufferFree (hashcat_ctx, &device_param->vk_d_##buf_name)
 
 int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
 {
@@ -15445,6 +17313,13 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
           }
           #endif
 
+          if (device_param->is_vulkan == true)
+          {
+            // vulkan has no such query
+
+            vector_width = 1;
+          }
+
           if (device_param->is_opencl == true)
           {
             // For CPU we can ask the runtime
@@ -15487,6 +17362,13 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
             vector_width = 1;
           }
           #endif
+
+          if (device_param->is_vulkan == true)
+          {
+            // vulkan has no such query
+
+            vector_width = 1;
+          }
 
           if (device_param->is_opencl == true)
           {
@@ -16406,9 +18288,9 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
       device_param->opencl_program_shared = opencl_program_borrow (hashcat_ctx, device_param, backend_devices_idx, PROGRAM_SLOT_SHARED);
 
       #if defined (__APPLE__)
-      const bool rc_load_kernel = (device_param->opencl_program_shared != NULL) ? true : load_kernel (hashcat_ctx, device_param, "shared_kernel", source_file, cached_file, build_options_buf, cache_disable, &device_param->opencl_program_shared, &device_param->cuda_module_shared, &device_param->hip_module_shared, &device_param->metal_library_shared);
+      const bool rc_load_kernel = (device_param->opencl_program_shared != NULL) ? true : load_kernel (hashcat_ctx, device_param, "shared_kernel", source_file, cached_file, build_options_buf, cache_disable, &device_param->opencl_program_shared, &device_param->cuda_module_shared, &device_param->hip_module_shared, &device_param->metal_library_shared, &device_param->vk_module_shared, &device_param->vk_module_shared_refl);
       #else
-      const bool rc_load_kernel = (device_param->opencl_program_shared != NULL) ? true : load_kernel (hashcat_ctx, device_param, "shared_kernel", source_file, cached_file, build_options_buf, cache_disable, &device_param->opencl_program_shared, &device_param->cuda_module_shared, &device_param->hip_module_shared, NULL);
+      const bool rc_load_kernel = (device_param->opencl_program_shared != NULL) ? true : load_kernel (hashcat_ctx, device_param, "shared_kernel", source_file, cached_file, build_options_buf, cache_disable, &device_param->opencl_program_shared, &device_param->cuda_module_shared, &device_param->hip_module_shared, NULL, &device_param->vk_module_shared, &device_param->vk_module_shared_refl);
       #endif
 
       if (rc_load_kernel == false)
@@ -16440,6 +18322,11 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
       if (device_param->is_opencl == true)
       {
         rc = backend_session_setup_opencl_kernel_shared (hashcat_ctx, device_param);
+      }
+
+      if (device_param->is_vulkan == true)
+      {
+        rc = backend_session_setup_vulkan_kernel_shared (hashcat_ctx, device_param);
       }
 
       if (rc == -2)
@@ -16551,7 +18438,18 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
 
       char source_file[256] = { 0 };
 
-      generate_source_kernel_filename (user_options->slow_candidates, hashconfig->attack_exec, user_options_extra->attack_kern, kern_type, hashconfig->opti_type, folder_config->shared_dir, source_file);
+      // the vulkan backend falls back to the pure source for modes whose optimized
+      // kernels clspv cannot compile correctly (see vk_optimized_kernel_broken ());
+      // both names and the cache key have to follow, so the fallback happens before either
+
+      u32 opti_type = hashconfig->opti_type;
+
+      if ((device_param->is_vulkan == true) && (vk_optimized_kernel_broken (kern_type) == true))
+      {
+        opti_type &= ~(u32) OPTI_TYPE_OPTIMIZED_KERNEL;
+      }
+
+      generate_source_kernel_filename (user_options->slow_candidates, hashconfig->attack_exec, user_options_extra->attack_kern, kern_type, opti_type, folder_config->shared_dir, source_file);
 
       if (hc_path_read (source_file) == false)
       {
@@ -16599,7 +18497,7 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
 
       char cached_file[256] = { 0 };
 
-      generate_cached_kernel_filename (user_options->slow_candidates, hashconfig->attack_exec, user_options_extra->attack_kern, kern_type, hashconfig->opti_type, folder_config->cache_dir, device_name_chksum, cached_file, device_param->is_metal);
+      generate_cached_kernel_filename (user_options->slow_candidates, hashconfig->attack_exec, user_options_extra->attack_kern, kern_type, opti_type, folder_config->cache_dir, device_name_chksum, cached_file, device_param->is_metal);
 
       /**
        * load kernel
@@ -16608,9 +18506,9 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
       device_param->opencl_program = opencl_program_borrow (hashcat_ctx, device_param, backend_devices_idx, PROGRAM_SLOT_MAIN);
 
       #if defined (__APPLE__)
-      const bool rc_load_kernel = (device_param->opencl_program != NULL) ? true : load_kernel (hashcat_ctx, device_param, "main_kernel", source_file, cached_file, build_options_module_buf, cache_disable, &device_param->opencl_program, &device_param->cuda_module, &device_param->hip_module, &device_param->metal_library);
+      const bool rc_load_kernel = (device_param->opencl_program != NULL) ? true : load_kernel (hashcat_ctx, device_param, "main_kernel", source_file, cached_file, build_options_module_buf, cache_disable, &device_param->opencl_program, &device_param->cuda_module, &device_param->hip_module, &device_param->metal_library, &device_param->vk_module, &device_param->vk_module_refl);
       #else
-      const bool rc_load_kernel = (device_param->opencl_program != NULL) ? true : load_kernel (hashcat_ctx, device_param, "main_kernel", source_file, cached_file, build_options_module_buf, cache_disable, &device_param->opencl_program, &device_param->cuda_module, &device_param->hip_module, NULL);
+      const bool rc_load_kernel = (device_param->opencl_program != NULL) ? true : load_kernel (hashcat_ctx, device_param, "main_kernel", source_file, cached_file, build_options_module_buf, cache_disable, &device_param->opencl_program, &device_param->cuda_module, &device_param->hip_module, NULL, &device_param->vk_module, &device_param->vk_module_refl);
       #endif
 
       if (rc_load_kernel == false)
@@ -16663,9 +18561,9 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
         device_param->opencl_program_mp = opencl_program_borrow (hashcat_ctx, device_param, backend_devices_idx, PROGRAM_SLOT_MP);
 
         #if defined (__APPLE__)
-        const bool rc_load_kernel = (device_param->opencl_program_mp != NULL) ? true : load_kernel (hashcat_ctx, device_param, "mp_kernel", source_file, cached_file, build_options_buf, cache_disable, &device_param->opencl_program_mp, &device_param->cuda_module_mp, &device_param->hip_module_mp, &device_param->metal_library_mp);
+        const bool rc_load_kernel = (device_param->opencl_program_mp != NULL) ? true : load_kernel (hashcat_ctx, device_param, "mp_kernel", source_file, cached_file, build_options_buf, cache_disable, &device_param->opencl_program_mp, &device_param->cuda_module_mp, &device_param->hip_module_mp, &device_param->metal_library_mp, &device_param->vk_module_mp, &device_param->vk_module_mp_refl);
         #else
-        const bool rc_load_kernel = (device_param->opencl_program_mp != NULL) ? true : load_kernel (hashcat_ctx, device_param, "mp_kernel", source_file, cached_file, build_options_buf, cache_disable, &device_param->opencl_program_mp, &device_param->cuda_module_mp, &device_param->hip_module_mp, NULL);
+        const bool rc_load_kernel = (device_param->opencl_program_mp != NULL) ? true : load_kernel (hashcat_ctx, device_param, "mp_kernel", source_file, cached_file, build_options_buf, cache_disable, &device_param->opencl_program_mp, &device_param->cuda_module_mp, &device_param->hip_module_mp, NULL, &device_param->vk_module_mp, &device_param->vk_module_mp_refl);
         #endif
 
         if (rc_load_kernel == false)
@@ -16718,9 +18616,9 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
         device_param->opencl_program_amp = opencl_program_borrow (hashcat_ctx, device_param, backend_devices_idx, PROGRAM_SLOT_AMP);
 
         #if defined (__APPLE__)
-        const bool rc_load_kernel = (device_param->opencl_program_amp != NULL) ? true : load_kernel (hashcat_ctx, device_param, "amp_kernel", source_file, cached_file, build_options_buf, cache_disable, &device_param->opencl_program_amp, &device_param->cuda_module_amp, &device_param->hip_module_amp, &device_param->metal_library_amp);
+        const bool rc_load_kernel = (device_param->opencl_program_amp != NULL) ? true : load_kernel (hashcat_ctx, device_param, "amp_kernel", source_file, cached_file, build_options_buf, cache_disable, &device_param->opencl_program_amp, &device_param->cuda_module_amp, &device_param->hip_module_amp, &device_param->metal_library_amp, &device_param->vk_module_amp, &device_param->vk_module_amp_refl);
         #else
-        const bool rc_load_kernel = (device_param->opencl_program_amp != NULL) ? true : load_kernel (hashcat_ctx, device_param, "amp_kernel", source_file, cached_file, build_options_buf, cache_disable, &device_param->opencl_program_amp, &device_param->cuda_module_amp, &device_param->hip_module_amp, NULL);
+        const bool rc_load_kernel = (device_param->opencl_program_amp != NULL) ? true : load_kernel (hashcat_ctx, device_param, "amp_kernel", source_file, cached_file, build_options_buf, cache_disable, &device_param->opencl_program_amp, &device_param->cuda_module_amp, &device_param->hip_module_amp, NULL, &device_param->vk_module_amp, &device_param->vk_module_amp_refl);
         #endif
 
         if (rc_load_kernel == false)
@@ -17206,6 +19104,95 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
       if (hc_clFlush (hashcat_ctx, device_param->opencl_command_queue) == -1) return -1;
     }
 
+    if (device_param->is_vulkan == true)
+    {
+      HC_VK_CREATEBUFFER (bitmap_ctx->bitmap_size, bitmap_s1_a);
+      HC_VK_CREATEBUFFER (bitmap_ctx->bitmap_size, bitmap_s1_b);
+      HC_VK_CREATEBUFFER (bitmap_ctx->bitmap_size, bitmap_s1_c);
+      HC_VK_CREATEBUFFER (bitmap_ctx->bitmap_size, bitmap_s1_d);
+      HC_VK_CREATEBUFFER (bitmap_ctx->bitmap_size, bitmap_s2_a);
+      HC_VK_CREATEBUFFER (bitmap_ctx->bitmap_size, bitmap_s2_b);
+      HC_VK_CREATEBUFFER (bitmap_ctx->bitmap_size, bitmap_s2_c);
+      HC_VK_CREATEBUFFER (bitmap_ctx->bitmap_size, bitmap_s2_d);
+      HC_VK_CREATEBUFFER (size_plains,             plain_bufs);
+      HC_VK_CREATEBUFFER (size_digests,            digests_buf);
+      HC_VK_CREATEBUFFER (size_shown,              digests_shown);
+      HC_VK_CREATEBUFFER (size_salts,              salt_bufs);
+      HC_VK_CREATEBUFFER (size_results,            result);
+      HC_VK_CREATEBUFFER (size_extra_buffer1,      extra0_buf);
+      HC_VK_CREATEBUFFER (size_extra_buffer2,      extra1_buf);
+      HC_VK_CREATEBUFFER (size_extra_buffer3,      extra2_buf);
+      HC_VK_CREATEBUFFER (size_extra_buffer4,      extra3_buf);
+      HC_VK_CREATEBUFFER (size_st_digests,         st_digests_buf);
+      HC_VK_CREATEBUFFER (size_st_salts,           st_salts_buf);
+      HC_VK_CREATEBUFFER (size_kernel_params,      kernel_param);
+
+      HC_VK_UPLOAD (bitmap_s1_a, bitmap_ctx->bitmap_s1_a, bitmap_ctx->bitmap_size);
+      HC_VK_UPLOAD (bitmap_s1_b, bitmap_ctx->bitmap_s1_b, bitmap_ctx->bitmap_size);
+      HC_VK_UPLOAD (bitmap_s1_c, bitmap_ctx->bitmap_s1_c, bitmap_ctx->bitmap_size);
+      HC_VK_UPLOAD (bitmap_s1_d, bitmap_ctx->bitmap_s1_d, bitmap_ctx->bitmap_size);
+      HC_VK_UPLOAD (bitmap_s2_a, bitmap_ctx->bitmap_s2_a, bitmap_ctx->bitmap_size);
+      HC_VK_UPLOAD (bitmap_s2_b, bitmap_ctx->bitmap_s2_b, bitmap_ctx->bitmap_size);
+      HC_VK_UPLOAD (bitmap_s2_c, bitmap_ctx->bitmap_s2_c, bitmap_ctx->bitmap_size);
+      HC_VK_UPLOAD (bitmap_s2_d, bitmap_ctx->bitmap_s2_d, bitmap_ctx->bitmap_size);
+      HC_VK_UPLOAD (digests_buf, hashes->digests_buf,     size_digests);
+      HC_VK_UPLOAD (salt_bufs,   hashes->salts_buf,       size_salts);
+
+      /**
+       * special buffers
+       */
+
+      if (user_options->slow_candidates == true)
+      {
+        HC_VK_CREATEBUFFER (size_rules_c, rules_c);
+      }
+      else
+      {
+        if (user_options_extra->attack_kern == ATTACK_KERN_STRAIGHT)
+        {
+          HC_VK_CREATEBUFFER (size_rules,   rules);
+          HC_VK_CREATEBUFFER (size_rules_c, rules_c);
+
+          HC_VK_UPLOAD (rules, straight_ctx->kernel_rules_buf, size_rules_src);
+        }
+        else if (user_options_extra->attack_kern == ATTACK_KERN_COMBI)
+        {
+          HC_VK_CREATEBUFFER (size_combs,          combs);
+          HC_VK_CREATEBUFFER (size_combs_c,        combs_c);
+          HC_VK_CREATEBUFFER (size_root_css,       root_css_buf);
+          HC_VK_CREATEBUFFER (size_markov_css,     markov_css_buf);
+        }
+        else if (user_options_extra->attack_kern == ATTACK_KERN_BF)
+        {
+          HC_VK_CREATEBUFFER (size_bfs,            bfs);
+          HC_VK_CREATEBUFFER (size_bfs,            bfs_c);
+          HC_VK_CREATEBUFFER (size_tm,             tm_c);
+          HC_VK_CREATEBUFFER (size_root_css,       root_css_buf);
+          HC_VK_CREATEBUFFER (size_markov_css,     markov_css_buf);
+        }
+      }
+
+      if (size_esalts)
+      {
+        HC_VK_CREATEBUFFER (size_esalts, esalt_bufs);
+
+        HC_VK_UPLOAD (esalt_bufs, hashes->esalts_buf, size_esalts);
+      }
+
+      if (hashconfig->st_hash != NULL)
+      {
+        HC_VK_UPLOAD (st_digests_buf, hashes->st_digests_buf, size_st_digests);
+        HC_VK_UPLOAD (st_salts_buf,   hashes->st_salts_buf,   size_st_salts);
+
+        if (size_esalts)
+        {
+          HC_VK_CREATEBUFFER (size_st_esalts, st_esalts_buf);
+
+          HC_VK_UPLOAD (st_esalts_buf, hashes->st_esalts_buf, size_st_esalts);
+        }
+      }
+    }
+
     /**
      * kernel args
      */
@@ -17356,6 +19343,38 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
       device_param->kernel_params[27] = &device_param->opencl_d_pcfg_wmap;
     }
 
+    if (device_param->is_vulkan == true)
+    {
+      device_param->kernel_params[ 0] = NULL; // &device_param->vk_d_pws_buf;
+      device_param->kernel_params[ 1] = &device_param->vk_d_rules_c;
+      device_param->kernel_params[ 2] = &device_param->vk_d_combs_c;
+      device_param->kernel_params[ 3] = &device_param->vk_d_bfs_c;
+      device_param->kernel_params[ 4] = NULL; // &device_param->vk_d_tmps;
+      device_param->kernel_params[ 5] = NULL; // &device_param->vk_d_hooks;
+      device_param->kernel_params[ 6] = &device_param->vk_d_bitmap_s1_a;
+      device_param->kernel_params[ 7] = &device_param->vk_d_bitmap_s1_b;
+      device_param->kernel_params[ 8] = &device_param->vk_d_bitmap_s1_c;
+      device_param->kernel_params[ 9] = &device_param->vk_d_bitmap_s1_d;
+      device_param->kernel_params[10] = &device_param->vk_d_bitmap_s2_a;
+      device_param->kernel_params[11] = &device_param->vk_d_bitmap_s2_b;
+      device_param->kernel_params[12] = &device_param->vk_d_bitmap_s2_c;
+      device_param->kernel_params[13] = &device_param->vk_d_bitmap_s2_d;
+      device_param->kernel_params[14] = &device_param->vk_d_plain_bufs;
+      device_param->kernel_params[15] = &device_param->vk_d_digests_buf;
+      device_param->kernel_params[16] = &device_param->vk_d_digests_shown;
+      device_param->kernel_params[17] = &device_param->vk_d_salt_bufs;
+      device_param->kernel_params[18] = &device_param->vk_d_esalt_bufs;
+      device_param->kernel_params[19] = &device_param->vk_d_result;
+      device_param->kernel_params[20] = &device_param->vk_d_extra0_buf;
+      device_param->kernel_params[21] = &device_param->vk_d_extra1_buf;
+      device_param->kernel_params[22] = &device_param->vk_d_extra2_buf;
+      device_param->kernel_params[23] = &device_param->vk_d_extra3_buf;
+      device_param->kernel_params[24] = &device_param->vk_d_kernel_param;
+      device_param->kernel_params[25] = &device_param->vk_d_pcfg_cells;
+      device_param->kernel_params[26] = &device_param->vk_d_pcfg_pool;
+      device_param->kernel_params[27] = &device_param->vk_d_pcfg_wmap;
+    }
+
     if (user_options->slow_candidates == true)
     {
     }
@@ -17391,6 +19410,11 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
         {
           device_param->kernel_params_mp[0] = &device_param->opencl_d_combs;
         }
+
+        if (device_param->is_vulkan == true)
+        {
+          device_param->kernel_params_mp[0] = &device_param->vk_d_combs;
+        }
       }
       else
       {
@@ -17416,6 +19440,11 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
           if (device_param->is_opencl == true)
           {
             device_param->kernel_params_mp[0] = &device_param->opencl_d_combs;
+          }
+
+          if (device_param->is_vulkan == true)
+          {
+            device_param->kernel_params_mp[0] = &device_param->vk_d_combs;
           }
         }
         else
@@ -17450,6 +19479,12 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
       {
         device_param->kernel_params_mp[1] = &device_param->opencl_d_root_css_buf;
         device_param->kernel_params_mp[2] = &device_param->opencl_d_markov_css_buf;
+      }
+
+      if (device_param->is_vulkan == true)
+      {
+        device_param->kernel_params_mp[1] = &device_param->vk_d_root_css_buf;
+        device_param->kernel_params_mp[2] = &device_param->vk_d_markov_css_buf;
       }
 
       device_param->kernel_params_mp[3] = &device_param->kernel_params_mp_buf64[3];
@@ -17497,6 +19532,12 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
         device_param->kernel_params_mp_l[2] = &device_param->opencl_d_markov_css_buf;
       }
 
+      if (device_param->is_vulkan == true)
+      {
+        device_param->kernel_params_mp_l[1] = &device_param->vk_d_root_css_buf;
+        device_param->kernel_params_mp_l[2] = &device_param->vk_d_markov_css_buf;
+      }
+
       device_param->kernel_params_mp_l[3] = &device_param->kernel_params_mp_l_buf64[3];
       device_param->kernel_params_mp_l[4] = &device_param->kernel_params_mp_l_buf32[4];
       device_param->kernel_params_mp_l[5] = &device_param->kernel_params_mp_l_buf32[5];
@@ -17540,6 +19581,13 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
         device_param->kernel_params_mp_r[0] = &device_param->opencl_d_bfs;
         device_param->kernel_params_mp_r[1] = &device_param->opencl_d_root_css_buf;
         device_param->kernel_params_mp_r[2] = &device_param->opencl_d_markov_css_buf;
+      }
+
+      if (device_param->is_vulkan == true)
+      {
+        device_param->kernel_params_mp_r[0] = &device_param->vk_d_bfs;
+        device_param->kernel_params_mp_r[1] = &device_param->vk_d_root_css_buf;
+        device_param->kernel_params_mp_r[2] = &device_param->vk_d_markov_css_buf;
       }
 
       device_param->kernel_params_mp_r[3] = &device_param->kernel_params_mp_r_buf64[3];
@@ -17590,6 +19638,15 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
         device_param->kernel_params_amp[4] = &device_param->opencl_d_bfs_c;
       }
 
+      if (device_param->is_vulkan == true)
+      {
+        device_param->kernel_params_amp[0] = NULL; // &device_param->vk_d_pws_buf;
+        device_param->kernel_params_amp[1] = NULL; // &device_param->vk_d_pws_amp_buf;
+        device_param->kernel_params_amp[2] = &device_param->vk_d_rules_c;
+        device_param->kernel_params_amp[3] = &device_param->vk_d_combs_c;
+        device_param->kernel_params_amp[4] = &device_param->vk_d_bfs_c;
+      }
+
       device_param->kernel_params_amp[5] = &device_param->kernel_params_amp_buf32[5];
       device_param->kernel_params_amp[6] = &device_param->kernel_params_amp_buf64[6];
 
@@ -17617,6 +19674,12 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
       {
         device_param->kernel_params_tm[0] = &device_param->opencl_d_bfs_c;
         device_param->kernel_params_tm[1] = &device_param->opencl_d_tm_c;
+      }
+
+      if (device_param->is_vulkan == true)
+      {
+        device_param->kernel_params_tm[0] = &device_param->vk_d_bfs_c;
+        device_param->kernel_params_tm[1] = &device_param->vk_d_tm_c;
       }
     }
 
@@ -17682,6 +19745,15 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
                                                         // : &device_param->opencl_d_pws_amp_buf;
     }
 
+    if (device_param->is_vulkan == true)
+    {
+      device_param->kernel_params_decompress[0] = NULL; // &device_param->vk_d_pws_idx;
+      device_param->kernel_params_decompress[1] = NULL; // &device_param->vk_d_pws_comp_buf;
+      device_param->kernel_params_decompress[2] = NULL; // (hashconfig->attack_exec == ATTACK_EXEC_INSIDE_KERNEL)
+                                                        // ? &device_param->vk_d_pws_buf
+                                                        // : &device_param->vk_d_pws_amp_buf;
+    }
+
     device_param->kernel_params_decompress[3] = &device_param->kernel_params_decompress_buf64[3];
 
     /**
@@ -17710,6 +19782,11 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
     if (device_param->is_opencl == true)
     {
       rc = backend_session_setup_opencl_kernel_types (hashcat_ctx, device_param, kern_type);
+    }
+
+    if (device_param->is_vulkan == true)
+    {
+      rc = backend_session_setup_vulkan_kernel_types (hashcat_ctx, device_param, kern_type);
     }
 
     if (rc == -2)
@@ -18082,6 +20159,47 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
       }
     }
 
+    if (device_param->is_vulkan == true)
+    {
+      // zero some data buffers
+
+      if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_plain_bufs,    device_param->size_plains)  == -1) return -1;
+      if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_digests_shown, device_param->size_shown)   == -1) return -1;
+      if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_result,        device_param->size_results) == -1) return -1;
+
+      // special buffers
+
+      if (user_options->slow_candidates == true)
+      {
+        if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_rules_c, size_rules_c) == -1) return -1;
+      }
+      else
+      {
+        if (user_options_extra->attack_kern == ATTACK_KERN_STRAIGHT)
+        {
+          if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_rules_c, size_rules_c) == -1) return -1;
+        }
+        else if (user_options_extra->attack_kern == ATTACK_KERN_COMBI)
+        {
+          if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_combs,          size_combs)       == -1) return -1;
+          if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_combs_c,        size_combs_c)     == -1) return -1;
+          if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_root_css_buf,   size_root_css)    == -1) return -1;
+          if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_markov_css_buf, size_markov_css)  == -1) return -1;
+        }
+        else if (user_options_extra->attack_kern == ATTACK_KERN_BF)
+        {
+          if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_bfs,            size_bfs)         == -1) return -1;
+          if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_bfs_c,          size_bfs)         == -1) return -1;
+          if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_tm_c,           size_tm)          == -1) return -1;
+          if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_root_css_buf,   size_root_css)    == -1) return -1;
+          if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_markov_css_buf, size_markov_css)  == -1) return -1;
+        }
+      }
+
+      // the mp / mp_l / mp_r scalar arguments are packed into the parameter buffer at
+      // dispatch time under vulkan, there is nothing to prepare here
+    }
+
     u32 threads_per_block = 32;
 
     if (device_param->is_cuda == true)
@@ -18148,6 +20266,12 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
     }
     else if (device_param->is_metal == true)
     {
+      threads_per_block = device_param->kernel_preferred_wgs_multiple;
+    }
+    else if (device_param->is_vulkan == true)
+    {
+      // no per-kernel query available under vulkan
+
       threads_per_block = device_param->kernel_preferred_wgs_multiple;
     }
 
@@ -18823,6 +20947,34 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
       if (run_opencl_kernel_bzero (hashcat_ctx, device_param, device_param->opencl_d_hooks,         device_param->size_hooks)    == -1) return -1;
     }
 
+    if (device_param->is_vulkan == true)
+    {
+      HC_VK_CREATEBUFFER (size_pws,        pws_buf);
+      HC_VK_CREATEBUFFER (size_pws_amp,    pws_amp_buf);
+      HC_VK_CREATEBUFFER (size_pws_comp,   pws_comp_buf);
+      HC_VK_CREATEBUFFER (size_pws_idx,    pws_idx);
+      HC_VK_CREATEBUFFER (size_pcfg_cells, pcfg_cells);
+      HC_VK_CREATEBUFFER (size_pcfg_pool,  pcfg_pool);
+      HC_VK_CREATEBUFFER (size_pcfg_wmap,  pcfg_wmap);
+      HC_VK_CREATEBUFFER (size_tmps,       tmps);
+      HC_VK_CREATEBUFFER (size_hooks,      hooks);
+
+      if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_pws_buf,      device_param->size_pws)      == -1) return -1;
+      if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_pws_amp_buf,  device_param->size_pws_amp)  == -1) return -1;
+      if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_pws_comp_buf, device_param->size_pws_comp) == -1) return -1;
+      if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_pws_idx,      device_param->size_pws_idx)  == -1) return -1;
+      if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_pcfg_cells, size_pcfg_cells) == -1) return -1;
+      if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_pcfg_wmap, size_pcfg_wmap) == -1) return -1;
+
+      if (user_options_extra->attack_kern == ATTACK_KERN_PCFG)
+      {
+        memcpy ((void *) device_param->vk_d_pcfg_pool.host, hashcat_ctx->generic_ctx[GENERIC_ROLE_BASE].dev_pool, size_pcfg_pool);
+      }
+
+      if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_tmps,         device_param->size_tmps)     == -1) return -1;
+      if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_hooks,        device_param->size_hooks)    == -1) return -1;
+    }
+
     /**
      * main host data
      */
@@ -18924,6 +21076,13 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
       device_param->kernel_params[ 5] = &device_param->opencl_d_hooks;
     }
 
+    if (device_param->is_vulkan == true)
+    {
+      device_param->kernel_params[ 0] = &device_param->vk_d_pws_buf;
+      device_param->kernel_params[ 4] = &device_param->vk_d_tmps;
+      device_param->kernel_params[ 5] = &device_param->vk_d_hooks;
+    }
+
     if (user_options->slow_candidates == true)
     {
     }
@@ -18975,6 +21134,13 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
 
             if (hc_clSetKernelArg (hashcat_ctx, device_param->opencl_kernel_mp, 0, sizeof (cl_mem), device_param->kernel_params_mp[0]) == -1) return -1;
           }
+
+          if (device_param->is_vulkan == true)
+          {
+            device_param->kernel_params_mp[0] = (hashconfig->attack_exec == ATTACK_EXEC_INSIDE_KERNEL)
+                                              ? &device_param->vk_d_pws_buf
+                                              : &device_param->vk_d_pws_amp_buf;
+          }
         }
       }
 
@@ -19014,6 +21180,13 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
                                               : &device_param->opencl_d_pws_amp_buf;
 
           if (hc_clSetKernelArg (hashcat_ctx, device_param->opencl_kernel_mp_l, 0, sizeof (cl_mem), device_param->kernel_params_mp_l[0]) == -1) return -1;
+        }
+
+        if (device_param->is_vulkan == true)
+        {
+          device_param->kernel_params_mp_l[0] = (hashconfig->attack_exec == ATTACK_EXEC_INSIDE_KERNEL)
+                                              ? &device_param->vk_d_pws_buf
+                                              : &device_param->vk_d_pws_amp_buf;
         }
       }
 
@@ -19056,6 +21229,12 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
 
           if (hc_clSetKernelArg (hashcat_ctx, device_param->opencl_kernel_amp, 0, sizeof (cl_mem), device_param->kernel_params_amp[0]) == -1) return -1;
           if (hc_clSetKernelArg (hashcat_ctx, device_param->opencl_kernel_amp, 1, sizeof (cl_mem), device_param->kernel_params_amp[1]) == -1) return -1;
+        }
+
+        if (device_param->is_vulkan == true)
+        {
+          device_param->kernel_params_amp[0] = &device_param->vk_d_pws_buf;
+          device_param->kernel_params_amp[1] = &device_param->vk_d_pws_amp_buf;
         }
       }
     }
@@ -19108,6 +21287,15 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
       if (hc_clSetKernelArg (hashcat_ctx, device_param->opencl_kernel_decompress, 0, sizeof (cl_mem), device_param->kernel_params_decompress[0]) == -1) return -1;
       if (hc_clSetKernelArg (hashcat_ctx, device_param->opencl_kernel_decompress, 1, sizeof (cl_mem), device_param->kernel_params_decompress[1]) == -1) return -1;
       if (hc_clSetKernelArg (hashcat_ctx, device_param->opencl_kernel_decompress, 2, sizeof (cl_mem), device_param->kernel_params_decompress[2]) == -1) return -1;
+    }
+
+    if (device_param->is_vulkan == true)
+    {
+      device_param->kernel_params_decompress[0] = &device_param->vk_d_pws_idx;
+      device_param->kernel_params_decompress[1] = &device_param->vk_d_pws_comp_buf;
+      device_param->kernel_params_decompress[2] = (hashconfig->attack_exec == ATTACK_EXEC_INSIDE_KERNEL)
+                                                ? &device_param->vk_d_pws_buf
+                                                : &device_param->vk_d_pws_amp_buf;
     }
 
     // context
@@ -19536,6 +21724,104 @@ void backend_session_destroy (hashcat_ctx_t *hashcat_ctx)
       //device_param->opencl_context       = NULL;
     }
 
+    if (device_param->is_vulkan == true)
+    {
+      HC_VK_FREEBUFFER (pws_buf);
+      HC_VK_FREEBUFFER (pws_amp_buf);
+      HC_VK_FREEBUFFER (pcfg_cells);
+      HC_VK_FREEBUFFER (pcfg_pool);
+      HC_VK_FREEBUFFER (pcfg_wmap);
+      HC_VK_FREEBUFFER (pws_comp_buf);
+      HC_VK_FREEBUFFER (pws_idx);
+      HC_VK_FREEBUFFER (rules);
+      HC_VK_FREEBUFFER (rules_c);
+      HC_VK_FREEBUFFER (combs);
+      HC_VK_FREEBUFFER (combs_c);
+      HC_VK_FREEBUFFER (bfs);
+      HC_VK_FREEBUFFER (bfs_c);
+      HC_VK_FREEBUFFER (bitmap_s1_a);
+      HC_VK_FREEBUFFER (bitmap_s1_b);
+      HC_VK_FREEBUFFER (bitmap_s1_c);
+      HC_VK_FREEBUFFER (bitmap_s1_d);
+      HC_VK_FREEBUFFER (bitmap_s2_a);
+      HC_VK_FREEBUFFER (bitmap_s2_b);
+      HC_VK_FREEBUFFER (bitmap_s2_c);
+      HC_VK_FREEBUFFER (bitmap_s2_d);
+      HC_VK_FREEBUFFER (plain_bufs);
+      HC_VK_FREEBUFFER (digests_buf);
+      HC_VK_FREEBUFFER (digests_shown);
+      HC_VK_FREEBUFFER (salt_bufs);
+      HC_VK_FREEBUFFER (esalt_bufs);
+      HC_VK_FREEBUFFER (tmps);
+      HC_VK_FREEBUFFER (hooks);
+      HC_VK_FREEBUFFER (result);
+      HC_VK_FREEBUFFER (extra0_buf);
+      HC_VK_FREEBUFFER (extra1_buf);
+      HC_VK_FREEBUFFER (extra2_buf);
+      HC_VK_FREEBUFFER (extra3_buf);
+      HC_VK_FREEBUFFER (root_css_buf);
+      HC_VK_FREEBUFFER (markov_css_buf);
+      HC_VK_FREEBUFFER (tm_c);
+      HC_VK_FREEBUFFER (st_digests_buf);
+      HC_VK_FREEBUFFER (st_salts_buf);
+      HC_VK_FREEBUFFER (st_esalts_buf);
+      HC_VK_FREEBUFFER (kernel_param);
+
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel1);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel12);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel2p);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel2);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel2e);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel23);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel3);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel4);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_init2);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_loop2p);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_loop2);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_mp);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_mp_l);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_mp_r);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_tm);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_amp);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_memset);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_bzero);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_atinit);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_utf8toutf16le);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_decompress);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_aux1);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_aux2);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_aux3);
+      hc_vkKernelTerm (hashcat_ctx, device_param->vk_kernel_aux4);
+
+      if (device_param->vk_module)
+      {
+        hc_vkProgramDestroy (hashcat_ctx, device_param->vk_device, device_param->vk_module);
+
+        device_param->vk_module = NULL;
+      }
+
+      if (device_param->vk_module_mp)
+      {
+        hc_vkProgramDestroy (hashcat_ctx, device_param->vk_device, device_param->vk_module_mp);
+
+        device_param->vk_module_mp = NULL;
+      }
+
+      if (device_param->vk_module_amp)
+      {
+        hc_vkProgramDestroy (hashcat_ctx, device_param->vk_device, device_param->vk_module_amp);
+
+        device_param->vk_module_amp = NULL;
+      }
+
+      if (device_param->vk_module_shared)
+      {
+        hc_vkProgramDestroy (hashcat_ctx, device_param->vk_device, device_param->vk_module_shared);
+
+        device_param->vk_module_shared = NULL;
+      }
+    }
+
     for (int slot_pos = 0; slot_pos < PW_PIPE_SLOTS; slot_pos++)
     {
       pw_batch_t *slot = &device_param->pws_slot[slot_pos];
@@ -19708,6 +21994,12 @@ int backend_session_update_mp (hashcat_ctx_t *hashcat_ctx)
 
       if (hc_clFlush (hashcat_ctx, device_param->opencl_command_queue) == -1) return -1;
     }
+
+    if (device_param->is_vulkan == true)
+    {
+      memcpy (device_param->vk_d_root_css_buf.host, mask_ctx->root_css_buf, device_param->size_root_css);
+      memcpy (device_param->vk_d_markov_css_buf.host, mask_ctx->markov_css_buf, device_param->size_markov_css);
+    }
   }
 
   return 0;
@@ -19763,6 +22055,12 @@ int backend_session_update_mp_rl (hashcat_ctx_t *hashcat_ctx, const u32 css_cnt_
       if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_markov_css_buf, CL_TRUE, 0, device_param->size_markov_css, mask_ctx->markov_css_buf, 0, NULL, NULL) == -1) return -1;
 
       if (hc_clFlush (hashcat_ctx, device_param->opencl_command_queue) == -1) return -1;
+    }
+
+    if (device_param->is_vulkan == true)
+    {
+      memcpy (device_param->vk_d_root_css_buf.host, mask_ctx->root_css_buf, device_param->size_root_css);
+      memcpy (device_param->vk_d_markov_css_buf.host, mask_ctx->markov_css_buf, device_param->size_markov_css);
     }
   }
 

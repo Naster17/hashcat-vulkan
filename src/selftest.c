@@ -12,6 +12,9 @@
 #include "thread.h"
 #include "selftest.h"
 
+int run_vulkan_kernel_utf8toutf16le (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 num);
+int run_vulkan_kernel_bzero         (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 size);
+
 static int selftest_init (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, u32 *highest_pw_len)
 {
   hashes_t             *hashes             = hashcat_ctx->hashes;
@@ -50,6 +53,13 @@ static int selftest_init (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_
     device_param->kernel_params[15] = &device_param->opencl_d_st_digests_buf;
     device_param->kernel_params[17] = &device_param->opencl_d_st_salts_buf;
     device_param->kernel_params[18] = &device_param->opencl_d_st_esalts_buf;
+  }
+
+  if (device_param->is_vulkan == true)
+  {
+    device_param->kernel_params[15] = &device_param->vk_d_st_digests_buf;
+    device_param->kernel_params[17] = &device_param->vk_d_st_salts_buf;
+    device_param->kernel_params[18] = &device_param->vk_d_st_esalts_buf;
   }
 
   device_param->kernel_param.digests_cnt = 1;
@@ -122,6 +132,11 @@ static int selftest_init (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_
     {
       if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_buf, CL_TRUE, 0, 1 * sizeof (pw_t), &pw, 0, NULL, &opencl_event) == -1) return -1;
     }
+
+    if (device_param->is_vulkan == true)
+    {
+      memcpy (device_param->vk_d_pws_buf.host, &pw, 1 * sizeof (pw_t));
+    }
   }
   else
   {
@@ -170,6 +185,11 @@ static int selftest_init (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_
         if (device_param->is_opencl == true)
         {
           if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_buf, CL_TRUE, 0, 1 * sizeof (pw_t), &pw, 0, NULL, &opencl_event) == -1) return -1;
+        }
+
+        if (device_param->is_vulkan == true)
+        {
+          memcpy (device_param->vk_d_pws_buf.host, &pw, 1 * sizeof (pw_t));
         }
       }
       else if (user_options_extra->attack_kern == ATTACK_KERN_COMBI)
@@ -249,6 +269,13 @@ static int selftest_init (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_
 
           if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_buf, CL_TRUE, 0, 1 * sizeof (pw_t), &pw, 0, NULL, &opencl_event) == -1) return -1;
         }
+
+        if (device_param->is_vulkan == true)
+        {
+          memcpy (device_param->vk_d_combs_c.host, &comb, 1 * sizeof (pw_t));
+
+          memcpy (device_param->vk_d_pws_buf.host, &pw, 1 * sizeof (pw_t));
+        }
       }
       else if (user_options_extra->attack_kern == ATTACK_KERN_BF)
       {
@@ -291,6 +318,11 @@ static int selftest_init (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_
           if (device_param->is_opencl == true)
           {
             if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_buf, CL_TRUE, 0, 1 * sizeof (pw_t), &pw, 0, NULL, &opencl_event) == -1) return -1;
+          }
+
+          if (device_param->is_vulkan == true)
+          {
+            memcpy (device_param->vk_d_pws_buf.host, &pw, 1 * sizeof (pw_t));
           }
         }
         else
@@ -352,6 +384,11 @@ static int selftest_init (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_
           if (device_param->is_opencl == true)
           {
             if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_bfs_c, CL_TRUE, 0, 1 * sizeof (bf_t), &bf, 0, NULL, &opencl_event) == -1) return -1;
+          }
+
+          if (device_param->is_vulkan == true)
+          {
+            memcpy (device_param->vk_d_bfs_c.host, &bf, 1 * sizeof (bf_t));
           }
 
           memset (&pw, 0, sizeof (pw));
@@ -460,6 +497,11 @@ static int selftest_init (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_
             if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_buf, CL_TRUE, 0, 1 * sizeof (pw_t), &pw, 0, NULL, &opencl_event) == -1) return -1;
           }
 
+          if (device_param->is_vulkan == true)
+          {
+            memcpy (device_param->vk_d_pws_buf.host, &pw, 1 * sizeof (pw_t));
+          }
+
           *highest_pw_len = pw.pw_len;
         }
       }
@@ -496,6 +538,11 @@ static int selftest_init (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_
       if (device_param->is_opencl == true)
       {
         if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_pws_buf, CL_TRUE, 0, 1 * sizeof (pw_t), &pw, 0, NULL, &opencl_event) == -1) return -1;
+      }
+
+      if (device_param->is_vulkan == true)
+      {
+        memcpy (device_param->vk_d_pws_buf.host, &pw, 1 * sizeof (pw_t));
       }
     }
   }
@@ -578,6 +625,11 @@ static int selftest_run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *d
       {
         if (run_opencl_kernel_utf8toutf16le (hashcat_ctx, device_param, device_param->opencl_d_pws_buf, 1) == -1) return -1;
       }
+
+      if (device_param->is_vulkan == true)
+      {
+        if (run_vulkan_kernel_utf8toutf16le (hashcat_ctx, device_param, &device_param->vk_d_pws_buf, 1) == -1) return -1;
+      }
     }
 
     if (hashconfig->opts_type & OPTS_TYPE_INIT)
@@ -616,6 +668,11 @@ static int selftest_run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *d
         if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_hooks, CL_TRUE, 0, device_param->size_hooks, device_param->hooks_buf, 0, NULL, NULL) == -1) return -1;
       }
 
+      if (device_param->is_vulkan == true)
+      {
+        memcpy (device_param->hooks_buf, device_param->vk_d_hooks.host, device_param->size_hooks);
+      }
+
       module_ctx->module_hook12 (device_param, module_ctx->hook_extra_params[0], hashes->st_hook_salts_buf, 0, 0);
 
       if (device_param->is_cuda == true)
@@ -638,6 +695,11 @@ static int selftest_run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *d
       if (device_param->is_opencl == true)
       {
         if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_hooks, CL_TRUE, 0, device_param->size_hooks, device_param->hooks_buf, 0, NULL, NULL) == -1) return -1;
+      }
+
+      if (device_param->is_vulkan == true)
+      {
+        memcpy (device_param->vk_d_hooks.host, device_param->hooks_buf, device_param->size_hooks);
       }
     }
 
@@ -711,6 +773,11 @@ static int selftest_run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *d
               /* blocking */
               if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_tmps, CL_TRUE, 0, hashconfig->tmp_size, device_param->h_tmps, 0, NULL, NULL) == -1) return -1;
             }
+
+            if (device_param->is_vulkan == true)
+            {
+              memcpy (device_param->h_tmps, device_param->vk_d_tmps.host, hashconfig->tmp_size);
+            }
           }
 
           hashes_t st_hashes;
@@ -752,6 +819,11 @@ static int selftest_run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *d
               /* blocking */
               if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_tmps, CL_TRUE, 0, hashconfig->tmp_size, device_param->h_tmps, 0, NULL, NULL) == -1) return -1;
             }
+
+            if (device_param->is_vulkan == true)
+            {
+              memcpy (device_param->vk_d_tmps.host, device_param->h_tmps, hashconfig->tmp_size);
+            }
           }
         }
       }
@@ -787,6 +859,11 @@ static int selftest_run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *d
           if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_hooks, CL_TRUE, 0, device_param->size_hooks, device_param->hooks_buf, 0, NULL, NULL) == -1) return -1;
         }
 
+        if (device_param->is_vulkan == true)
+        {
+          memcpy (device_param->hooks_buf, device_param->vk_d_hooks.host, device_param->size_hooks);
+        }
+
         module_ctx->module_hook23 (device_param, module_ctx->hook_extra_params[0], hashes->st_hook_salts_buf, 0, 0);
 
         if (device_param->is_cuda == true)
@@ -809,6 +886,11 @@ static int selftest_run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *d
         if (device_param->is_opencl == true)
         {
           if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_hooks, CL_TRUE, 0, device_param->size_hooks, device_param->hooks_buf, 0, NULL, NULL) == -1) return -1;
+        }
+
+        if (device_param->is_vulkan == true)
+        {
+          memcpy (device_param->vk_d_hooks.host, device_param->hooks_buf, device_param->size_hooks);
         }
       }
     }
@@ -874,6 +956,11 @@ static int selftest_run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *d
                 /* blocking */
                 if (hc_clEnqueueReadBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_tmps, CL_TRUE, 0, hashconfig->tmp_size, device_param->h_tmps, 0, NULL, NULL) == -1) return -1;
               }
+
+              if (device_param->is_vulkan == true)
+              {
+                memcpy (device_param->h_tmps, device_param->vk_d_tmps.host, hashconfig->tmp_size);
+              }
             }
 
             hashes_t st_hashes;
@@ -909,6 +996,11 @@ static int selftest_run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *d
               if (device_param->is_opencl == true)
               {
                 if (hc_clEnqueueWriteBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_tmps, CL_TRUE, 0, hashconfig->tmp_size, device_param->h_tmps, 0, NULL, NULL) == -1) return -1;
+              }
+
+              if (device_param->is_vulkan == true)
+              {
+                memcpy (device_param->vk_d_tmps.host, device_param->h_tmps, hashconfig->tmp_size);
               }
             }
           }
@@ -992,6 +1084,13 @@ static int selftest_cleanup (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *devi
     if (hc_clFlush (hashcat_ctx, device_param->opencl_command_queue) == -1) return -1;
   }
 
+  if (device_param->is_vulkan == true)
+  {
+    if (hc_vkQueueIdle (hashcat_ctx, device_param->vk_queue) == -1) return -1;
+
+    memcpy (num_cracked, device_param->vk_d_result.host, sizeof (u32));
+  }
+
   // finish : cleanup and restore
 
   // ??? bug because not set ??? device_param->kernel_param.salt_pos_host        = 0;
@@ -1061,6 +1160,20 @@ static int selftest_cleanup (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *devi
     if (run_opencl_kernel_bzero (hashcat_ctx, device_param, device_param->opencl_d_result,        device_param->size_results) == -1) return -1;
   }
 
+  if (device_param->is_vulkan == true)
+  {
+    device_param->kernel_params[15] = &device_param->vk_d_digests_buf;
+    device_param->kernel_params[17] = &device_param->vk_d_salt_bufs;
+    device_param->kernel_params[18] = &device_param->vk_d_esalt_bufs;
+
+    if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_pws_buf,       device_param->size_pws)     == -1) return -1;
+    if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_tmps,          device_param->size_tmps)    == -1) return -1;
+    if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_hooks,         device_param->size_hooks)   == -1) return -1;
+    if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_plain_bufs,    device_param->size_plains)  == -1) return -1;
+    if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_digests_shown, device_param->size_shown)   == -1) return -1;
+    if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_result,        device_param->size_results) == -1) return -1;
+  }
+
   if (user_options->slow_candidates == true)
   {
     if (device_param->is_cuda == true)
@@ -1083,6 +1196,11 @@ static int selftest_cleanup (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *devi
     if (device_param->is_opencl == true)
     {
       if (run_opencl_kernel_bzero (hashcat_ctx, device_param, device_param->opencl_d_rules_c, device_param->size_rules_c) == -1) return -1;
+    }
+
+    if (device_param->is_vulkan == true)
+    {
+      if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_rules_c, device_param->size_rules_c) == -1) return -1;
     }
   }
   else
@@ -1110,6 +1228,11 @@ static int selftest_cleanup (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *devi
       {
         if (run_opencl_kernel_bzero (hashcat_ctx, device_param, device_param->opencl_d_rules_c, device_param->size_rules_c) == -1) return -1;
       }
+
+      if (device_param->is_vulkan == true)
+      {
+        if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_rules_c, device_param->size_rules_c) == -1) return -1;
+      }
     }
     else if (user_options_extra->attack_kern == ATTACK_KERN_COMBI)
     {
@@ -1134,6 +1257,11 @@ static int selftest_cleanup (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *devi
       {
         if (run_opencl_kernel_bzero (hashcat_ctx, device_param, device_param->opencl_d_combs_c, device_param->size_combs) == -1) return -1;
       }
+
+      if (device_param->is_vulkan == true)
+      {
+        if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_combs_c, device_param->size_combs) == -1) return -1;
+      }
     }
     else if (user_options_extra->attack_kern == ATTACK_KERN_BF)
     {
@@ -1157,6 +1285,11 @@ static int selftest_cleanup (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *devi
       if (device_param->is_opencl == true)
       {
         if (run_opencl_kernel_bzero (hashcat_ctx, device_param, device_param->opencl_d_bfs_c, device_param->size_bfs) == -1) return -1;
+      }
+
+      if (device_param->is_vulkan == true)
+      {
+        if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_bfs_c, device_param->size_bfs) == -1) return -1;
       }
     }
   }
@@ -1222,6 +1355,11 @@ static int process_selftest (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *devi
     if (device_param->is_opencl == true)
     {
       event_log_error (hashcat_ctx, "* Device #%u: ATTENTION! OpenCL kernel self-test failed.", device_param->device_id + 1);
+    }
+
+    if (device_param->is_vulkan == true)
+    {
+      event_log_error (hashcat_ctx, "* Device #%u: ATTENTION! Vulkan kernel self-test failed.", device_param->device_id + 1);
     }
 
     if (device_param->is_metal == false)

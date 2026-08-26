@@ -12,6 +12,9 @@
 #include "shared.h"
 #include "autotune.h"
 
+int run_vulkan_kernel_atinit (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 num);
+int run_vulkan_kernel_bzero  (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_vk_buffer_t *buf, const u64 size);
+
 // How much longer a bridge is allowed to run per launch than a compute kernel is, per workload profile.
 //
 // TARGET_MSEC_PROFILE in backend.c is picked for a kernel on a GPU, where a short launch is what keeps a
@@ -419,6 +422,11 @@ static int autotune (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param
       if (run_opencl_kernel_atinit (hashcat_ctx, device_param, device_param->opencl_d_pws_buf, kernel_power_max) == -1) return -1;
     }
 
+    if (device_param->is_vulkan == true)
+    {
+      if (run_vulkan_kernel_atinit (hashcat_ctx, device_param, &device_param->vk_d_pws_buf, kernel_power_max) == -1) return -1;
+    }
+
     if (user_options->slow_candidates == true)
     {
     }
@@ -450,6 +458,11 @@ static int autotune (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param
           if (device_param->is_opencl == true)
           {
             if (hc_clEnqueueCopyBuffer (hashcat_ctx, device_param->opencl_command_queue, device_param->opencl_d_rules, device_param->opencl_d_rules_c, 0, 0, MIN (kernel_loops_max, KERNEL_RULES) * sizeof (kernel_rule_t), 0, NULL, NULL) == -1) return -1;
+          }
+
+          if (device_param->is_vulkan == true)
+          {
+            memcpy (device_param->vk_d_rules_c.host, device_param->vk_d_rules.host, MIN (kernel_loops_max, KERNEL_RULES) * sizeof (kernel_rule_t));
           }
         }
       }
@@ -891,6 +904,15 @@ static int autotune (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param
     device_param->at_rc = -6;
 
     if (hc_clFlush (hashcat_ctx, device_param->opencl_command_queue) == -1) return -1;
+  }
+
+  if (device_param->is_vulkan == true)
+  {
+    if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_pws_buf, device_param->size_pws) == -1) return -1;
+    if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_plain_bufs, device_param->size_plains) == -1) return -1;
+    if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_digests_shown, device_param->size_shown) == -1) return -1;
+    if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_result, device_param->size_results) == -1) return -1;
+    if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_tmps, device_param->size_tmps) == -1) return -1;
   }
 
   // reset timer

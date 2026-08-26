@@ -855,6 +855,7 @@ typedef enum user_options_defaults
   BACKEND_IGNORE_METAL     = false,
   #endif
   BACKEND_IGNORE_OPENCL    = false,
+  BACKEND_IGNORE_VULKAN    = false,
   BACKEND_INFO             = 0,
   BACKEND_VECTOR_WIDTH     = 0,
   OPTIMIZED_KERNEL         = false,
@@ -913,6 +914,8 @@ typedef enum user_options_map
   IDX_BACKEND_IGNORE_HIP        = 0xff02,
   IDX_BACKEND_IGNORE_METAL      = 0xff03,
   IDX_BACKEND_IGNORE_OPENCL     = 0xff04,
+  IDX_BACKEND_IGNORE_VULKAN     = 0xff63,
+  IDX_NATIVE_VULKAN             = 0xff64,
   IDX_BACKEND_INFO              = 'I',
   IDX_BACKEND_VECTOR_WIDTH      = 0xff05,
   IDX_BENCHMARK_ALL             = 0xff06,
@@ -1401,6 +1404,7 @@ typedef struct hc_fp
 #include "ext_hip.h"
 #include "ext_OpenCL.h"
 #include "ext_metal.h"
+#include "ext_vulkan.h"
 
 typedef struct hc_device_param
 {
@@ -2101,6 +2105,92 @@ typedef struct hc_device_param
 
   #endif // __APPLE__
 
+  // API: vulkan
+
+  bool              is_vulkan;
+
+  VkInstance        vk_instance;
+  VkPhysicalDevice  vk_physical_device;
+  VkDevice          vk_device;
+  VkQueue           vk_queue;
+
+  vk_program        vk_module;
+  vk_program        vk_module_shared;
+  vk_program        vk_module_mp;
+  vk_program        vk_module_amp;
+
+  hc_vk_refl_t     *vk_module_refl;
+  hc_vk_refl_t     *vk_module_shared_refl;
+  hc_vk_refl_t     *vk_module_mp_refl;
+  hc_vk_refl_t     *vk_module_amp_refl;
+
+  vk_kernel         vk_kernel1;
+  vk_kernel         vk_kernel12;
+  vk_kernel         vk_kernel2p;
+  vk_kernel         vk_kernel2;
+  vk_kernel         vk_kernel2e;
+  vk_kernel         vk_kernel23;
+  vk_kernel         vk_kernel3;
+  vk_kernel         vk_kernel4;
+  vk_kernel         vk_kernel_init2;
+  vk_kernel         vk_kernel_loop2p;
+  vk_kernel         vk_kernel_loop2;
+  vk_kernel         vk_kernel_mp;
+  vk_kernel         vk_kernel_mp_l;
+  vk_kernel         vk_kernel_mp_r;
+  vk_kernel         vk_kernel_amp;
+  vk_kernel         vk_kernel_tm;
+  vk_kernel         vk_kernel_memset;
+  vk_kernel         vk_kernel_bzero;
+  vk_kernel         vk_kernel_atinit;
+  vk_kernel         vk_kernel_utf8toutf16le;
+  vk_kernel         vk_kernel_decompress;
+  vk_kernel         vk_kernel_aux1;
+  vk_kernel         vk_kernel_aux2;
+  vk_kernel         vk_kernel_aux3;
+  vk_kernel         vk_kernel_aux4;
+
+  hc_vk_buffer_t    vk_d_pws_buf;
+  hc_vk_buffer_t    vk_d_pws_amp_buf;
+  hc_vk_buffer_t    vk_d_pws_comp_buf;
+  hc_vk_buffer_t    vk_d_pws_idx;
+  hc_vk_buffer_t    vk_d_rules;
+  hc_vk_buffer_t    vk_d_rules_c;
+  hc_vk_buffer_t    vk_d_combs;
+  hc_vk_buffer_t    vk_d_combs_c;
+  hc_vk_buffer_t    vk_d_pcfg_cells;
+  hc_vk_buffer_t    vk_d_pcfg_pool;
+  hc_vk_buffer_t    vk_d_pcfg_wmap;
+  hc_vk_buffer_t    vk_d_bfs;
+  hc_vk_buffer_t    vk_d_bfs_c;
+  hc_vk_buffer_t    vk_d_tm_c;
+  hc_vk_buffer_t    vk_d_bitmap_s1_a;
+  hc_vk_buffer_t    vk_d_bitmap_s1_b;
+  hc_vk_buffer_t    vk_d_bitmap_s1_c;
+  hc_vk_buffer_t    vk_d_bitmap_s1_d;
+  hc_vk_buffer_t    vk_d_bitmap_s2_a;
+  hc_vk_buffer_t    vk_d_bitmap_s2_b;
+  hc_vk_buffer_t    vk_d_bitmap_s2_c;
+  hc_vk_buffer_t    vk_d_bitmap_s2_d;
+  hc_vk_buffer_t    vk_d_plain_bufs;
+  hc_vk_buffer_t    vk_d_digests_buf;
+  hc_vk_buffer_t    vk_d_digests_shown;
+  hc_vk_buffer_t    vk_d_salt_bufs;
+  hc_vk_buffer_t    vk_d_esalt_bufs;
+  hc_vk_buffer_t    vk_d_tmps;
+  hc_vk_buffer_t    vk_d_hooks;
+  hc_vk_buffer_t    vk_d_result;
+  hc_vk_buffer_t    vk_d_extra0_buf;
+  hc_vk_buffer_t    vk_d_extra1_buf;
+  hc_vk_buffer_t    vk_d_extra2_buf;
+  hc_vk_buffer_t    vk_d_extra3_buf;
+  hc_vk_buffer_t    vk_d_root_css_buf;
+  hc_vk_buffer_t    vk_d_markov_css_buf;
+  hc_vk_buffer_t    vk_d_st_digests_buf;
+  hc_vk_buffer_t    vk_d_st_salts_buf;
+  hc_vk_buffer_t    vk_d_st_esalts_buf;
+  hc_vk_buffer_t    vk_d_kernel_param;
+
   // API: opencl
 
   bool              is_opencl;
@@ -2236,6 +2326,7 @@ typedef struct backend_ctx
   void               *hip;
   void               *mtl;
   void               *ocl;
+  void               *vk;
 
   void               *nvrtc;
   void               *hiprtc;
@@ -2745,12 +2836,14 @@ typedef struct user_options
   bool         loopback;
   bool         machine_readable;
   bool         markov_classic;
+  bool         native_vulkan;
   bool         markov;
   bool         markov_inverse;
   bool         backend_ignore_cuda;
   bool         backend_ignore_hip;
   bool         backend_ignore_metal;
   bool         backend_ignore_opencl;
+  bool         backend_ignore_vulkan;
   bool         optimized_kernel;
   bool         multiply_accel;
   bool         outfile_autohex;

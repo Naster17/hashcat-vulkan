@@ -1366,7 +1366,7 @@ EMU_OBJS_ALL            += emu_inc_hash_md4 emu_inc_hash_md5 emu_inc_hash_ripemd
 EMU_OBJS_ALL            += emu_inc_cipher_aes emu_inc_cipher_camellia emu_inc_cipher_des emu_inc_cipher_kuznyechik emu_inc_cipher_serpent emu_inc_cipher_twofish
 EMU_OBJS_ALL            += emu_inc_hash_base58
 
-OBJS_ALL                := affinity autotune backend benchmark bitmap bitops bridges combinator common convert cpt cpu_crc32 cpu_features debugfile dispatch dynloader event ext_ADL ext_cuda ext_hip ext_nvapi ext_nvml ext_nvrtc ext_hiprtc ext_OpenCL ext_openssl ext_sysfs_amdgpu ext_sysfs_intelgpu ext_sysfs_cpu ext_lzma ext_zlib feed filehandling folder hashcat hashes hlfmt hwmon induct interface keyboard_layout locking logfile loopback memchr memory monitor mpsp outfile_check outfile parser path pidfile plugin_abi potfile pubkey pwpipe restore rp rp_cpu selftest slow_candidates shared status stdout straight generic system terminal thread timer tuningdb usage user_options wordlist $(EMU_OBJS_ALL)
+OBJS_ALL                := affinity autotune backend benchmark bitmap bitops bridges combinator common convert cpt cpu_crc32 cpu_features debugfile dispatch dynloader event ext_ADL ext_cuda ext_hip ext_nvapi ext_nvml ext_nvrtc ext_hiprtc ext_OpenCL ext_openssl ext_vulkan ext_sysfs_amdgpu ext_sysfs_intelgpu ext_sysfs_cpu ext_lzma ext_zlib feed filehandling folder hashcat hashes hlfmt hwmon induct interface keyboard_layout locking logfile loopback memchr memory monitor mpsp outfile_check outfile parser path pidfile plugin_abi potfile pubkey pwpipe restore rp rp_cpu selftest slow_candidates shared status stdout straight generic system terminal thread timer tuningdb usage user_options wordlist $(EMU_OBJS_ALL)
 
 ifeq ($(ENABLE_BRAIN),1)
 OBJS_ALL                += brain
@@ -2084,3 +2084,50 @@ uninstall:
 	$(RM) -rf $(DESTDIR)$(LIBRARY_DEV_FOLDER)
 	$(RM) -rf $(DESTDIR)$(SHARED_FOLDER)
 	$(RM) -rf $(DESTDIR)$(DOCUMENT_FOLDER)
+
+##
+## Targets: container release builds
+##
+## Build the release inside a container (Alpine for musl, Debian for glibc) so
+## the artifacts do not depend on the host toolchain, and unpack the archive
+## under dist/. The plugins and the OpenCL/Vulkan loaders are runtime loaded,
+## which is what keeps this honest: everything we can link statically is
+## static, the drivers never can be.
+##
+##   make docker-musl          dist/musl/hashcat-<version>-musl-<arch>.tar.gz
+##   make docker-debian        dist/glibc/hashcat-<version>-glibc-<arch>.tar.gz
+##   make docker-musl-shell    shell in the Alpine build environment
+##
+
+DOCKER                  ?= docker
+IMAGE_MUSL              := hashcat-build-musl
+IMAGE_DEBIAN            := hashcat-build-debian
+
+ARCH                    := $(shell uname -m)
+PORTABLE_VERSION        ?= $(patsubst v%,%,$(PRODUCTION_VERSION))
+
+.PHONY: docker-musl-image docker-musl docker-musl-shell
+.PHONY: docker-debian-image docker-debian
+
+docker-musl-image:
+	$(DOCKER) build -f tools/docker/Dockerfile.musl --build-arg PORTABLE_VERSION=$(PORTABLE_VERSION) -t $(IMAGE_MUSL) .
+
+docker-musl: docker-musl-image
+	$(INSTALL) -m 755 -d dist/musl
+	id=$$($(DOCKER) create $(IMAGE_MUSL) true) && \
+	$(DOCKER) cp $$id:/out/. dist/musl/ && \
+	$(DOCKER) rm $$id >/dev/null
+	@echo "== musl release under dist/musl =="
+
+docker-musl-shell: docker-musl-image
+	@$(DOCKER) run --rm -it $(IMAGE_MUSL) sh
+
+docker-debian-image:
+	$(DOCKER) build -f tools/docker/Dockerfile.debian --build-arg PORTABLE_VERSION=$(PORTABLE_VERSION) -t $(IMAGE_DEBIAN) .
+
+docker-debian: docker-debian-image
+	$(INSTALL) -m 755 -d dist/glibc
+	id=$$($(DOCKER) create $(IMAGE_DEBIAN) true) && \
+	$(DOCKER) cp $$id:/out/. dist/glibc/ && \
+	$(DOCKER) rm $$id >/dev/null
+	@echo "== glibc release under dist/glibc =="
