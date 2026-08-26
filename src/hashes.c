@@ -1295,6 +1295,16 @@ int check_cracked (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param)
           break;
         }
       }
+
+      if (device_param->is_vulkan == true)
+      {
+        rc = run_vulkan_kernel_memset32 (hashcat_ctx, device_param, &device_param->vk_d_digests_shown, salt_buf->digests_offset * sizeof (u32), 0, salt_buf->digests_cnt * sizeof (u32));
+
+        if (rc == -1)
+        {
+          break;
+        }
+      }
     }
   }
 
@@ -1345,6 +1355,11 @@ int check_cracked (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param)
     if (run_opencl_kernel_bzero (hashcat_ctx, device_param, device_param->opencl_d_result, sizeof (u32)) == -1) return -1;
 
     if (hc_clFlush (hashcat_ctx, device_param->opencl_command_queue) == -1) return -1;
+  }
+
+  if (device_param->is_vulkan == true)
+  {
+    if (run_vulkan_kernel_bzero (hashcat_ctx, device_param, &device_param->vk_d_result, sizeof (u32)) == -1) return -1;
   }
 
   return 0;

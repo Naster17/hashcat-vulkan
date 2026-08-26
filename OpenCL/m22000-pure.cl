@@ -577,6 +577,87 @@ KERNEL_FQ KERNEL_FA void m22000_aux1 (KERN_ATTR_TMPS_ESALT (wpa_pbkdf2_tmp_t, wp
 
       md5_hmac_ctx_t ctx2;
 
+      #ifdef VK_FIX_WPA1_MD5
+      // clspv (SimplifyPointerBitcast family) misindexes the third md5_ctx_t
+      // inside md5_hmac_ctx_t: ctx2.opad.h[0..3] comes out shifted one u32 slot
+      // for the md5 side (ipad and everything through it is fine). the hmac is
+      // done with two flat md5_ctx_t locals instead of the nested struct.
+
+      u32 mic[4];
+
+      {
+        u32 a0[4];
+
+        a0[0] = ctx1.opad.h[0] ^ 0x36363636;
+        a0[1] = ctx1.opad.h[1] ^ 0x36363636;
+        a0[2] = ctx1.opad.h[2] ^ 0x36363636;
+        a0[3] = ctx1.opad.h[3] ^ 0x36363636;
+
+        u32 a1[4];
+        u32 a2[4];
+        u32 a3[4];
+
+        for (u32 i = 0; i < 4; i++)
+        {
+          a1[i] = 0x36363636;
+          a2[i] = 0x36363636;
+          a3[i] = 0x36363636;
+        }
+
+        md5_ctx_t m1;
+
+        md5_init (&m1);
+
+        md5_update_64 (&m1, a0, a1, a2, a3, 64);
+
+        md5_update_global (&m1, wpa->eapol, wpa->eapol_len);
+
+        md5_final (&m1);
+
+        u32 b0[4];
+
+        b0[0] = ctx1.opad.h[0] ^ 0x5c5c5c5c;
+        b0[1] = ctx1.opad.h[1] ^ 0x5c5c5c5c;
+        b0[2] = ctx1.opad.h[2] ^ 0x5c5c5c5c;
+        b0[3] = ctx1.opad.h[3] ^ 0x5c5c5c5c;
+
+        u32 b1[4];
+        u32 b2[4];
+        u32 b3[4];
+
+        for (u32 i = 0; i < 4; i++)
+        {
+          b1[i] = 0x5c5c5c5c;
+          b2[i] = 0x5c5c5c5c;
+          b3[i] = 0x5c5c5c5c;
+        }
+
+        md5_ctx_t m2;
+
+        md5_init (&m2);
+
+        md5_update_64 (&m2, b0, b1, b2, b3, 64);
+
+        m2.w0[0] = m1.h[0];
+        m2.w0[1] = m1.h[1];
+        m2.w0[2] = m1.h[2];
+        m2.w0[3] = m1.h[3];
+
+        m2.len += 16;
+
+        md5_final (&m2);
+
+        mic[0] = m2.h[0];
+        mic[1] = m2.h[1];
+        mic[2] = m2.h[2];
+        mic[3] = m2.h[3];
+      }
+
+      ctx2.opad.h[0] = hc_swap32_S (mic[0]);
+      ctx2.opad.h[1] = hc_swap32_S (mic[1]);
+      ctx2.opad.h[2] = hc_swap32_S (mic[2]);
+      ctx2.opad.h[3] = hc_swap32_S (mic[3]);
+      #else
       md5_hmac_init_64 (&ctx2, ctx1.opad.h, z, z, z);
 
       md5_hmac_update_global (&ctx2, wpa->eapol, wpa->eapol_len);
@@ -587,15 +668,26 @@ KERNEL_FQ KERNEL_FA void m22000_aux1 (KERN_ATTR_TMPS_ESALT (wpa_pbkdf2_tmp_t, wp
       ctx2.opad.h[1] = hc_swap32_S (ctx2.opad.h[1]);
       ctx2.opad.h[2] = hc_swap32_S (ctx2.opad.h[2]);
       ctx2.opad.h[3] = hc_swap32_S (ctx2.opad.h[3]);
+      #endif
 
       /**
        * final compare
        */
 
+      #ifdef VK_FIX_WPA1_MD5
+      // the flat mic[] avoids the clspv-misindexed ctx2.opad.h accesses
+      // entirely; compare straight off the locals
+
+      if ((hc_swap32_S (mic[0]) == wpa->keymic[0])
+       && (hc_swap32_S (mic[1]) == wpa->keymic[1])
+       && (hc_swap32_S (mic[2]) == wpa->keymic[2])
+       && (hc_swap32_S (mic[3]) == wpa->keymic[3]))
+      #else
       if ((ctx2.opad.h[0] == wpa->keymic[0])
        && (ctx2.opad.h[1] == wpa->keymic[1])
        && (ctx2.opad.h[2] == wpa->keymic[2])
        && (ctx2.opad.h[3] == wpa->keymic[3]))
+      #endif
       {
         if (hc_atomic_inc (&hashes_shown[digest_cur]) == 0)
         {

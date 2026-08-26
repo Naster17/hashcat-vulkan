@@ -1974,13 +1974,13 @@ install_docs: install_make_shared_root
 	$(INSTALL) -m 755 -d                                                    $(DESTDIR)$(DOCUMENT_FOLDER)/rules
 	$(INSTALL) -m 755 -d                                                    $(DESTDIR)$(DOCUMENT_FOLDER)/extra
 	$(INSTALL) -m 755 -d                                                    $(DESTDIR)$(DOCUMENT_FOLDER)/extra/tab_completion
-	$(INSTALL) -m 644 example.dict                                          $(DESTDIR)$(DOCUMENT_FOLDER)/
-	$(INSTALL) -m 644 example0.hash                                         $(DESTDIR)$(DOCUMENT_FOLDER)/
-	$(INSTALL) -m 644 example400.hash                                       $(DESTDIR)$(DOCUMENT_FOLDER)/
-	$(INSTALL) -m 644 example500.hash                                       $(DESTDIR)$(DOCUMENT_FOLDER)/
-	$(INSTALL) -m 755 example0.sh                                           $(DESTDIR)$(DOCUMENT_FOLDER)/
-	$(INSTALL) -m 755 example400.sh                                         $(DESTDIR)$(DOCUMENT_FOLDER)/
-	$(INSTALL) -m 755 example500.sh                                         $(DESTDIR)$(DOCUMENT_FOLDER)/
+	$(INSTALL) -m 644 examples/example.dict                                 $(DESTDIR)$(DOCUMENT_FOLDER)/
+	$(INSTALL) -m 644 examples/example0.hash                                $(DESTDIR)$(DOCUMENT_FOLDER)/
+	$(INSTALL) -m 644 examples/example400.hash                              $(DESTDIR)$(DOCUMENT_FOLDER)/
+	$(INSTALL) -m 644 examples/example500.hash                              $(DESTDIR)$(DOCUMENT_FOLDER)/
+	$(INSTALL) -m 755 examples/example0.sh                                  $(DESTDIR)$(DOCUMENT_FOLDER)/
+	$(INSTALL) -m 755 examples/example400.sh                                $(DESTDIR)$(DOCUMENT_FOLDER)/
+	$(INSTALL) -m 755 examples/example500.sh                                $(DESTDIR)$(DOCUMENT_FOLDER)/
 	$(INSTALL) -m 644 extra/tab_completion/hashcat.sh                       $(DESTDIR)$(DOCUMENT_FOLDER)/extra/tab_completion/
 	$(INSTALL) -m 644 extra/tab_completion/howto.txt                        $(DESTDIR)$(DOCUMENT_FOLDER)/extra/tab_completion/
 	$(INSTALL) -m 755 extra/tab_completion/install                          $(DESTDIR)$(DOCUMENT_FOLDER)/extra/tab_completion/

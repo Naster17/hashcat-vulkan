@@ -3726,13 +3726,13 @@ int run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, con
 
     if (getenv ("HASHCAT_VK_DUMP") != NULL)
     {
-      if (vk_kern->entrypoint && (strncmp (vk_kern->entrypoint, "m01800", 6) == 0 || strncmp (vk_kern->entrypoint, "m00500", 6) == 0 || strncmp (vk_kern->entrypoint, "m00400", 6) == 0))
+      if (vk_kern->entrypoint && (strncmp (vk_kern->entrypoint, "m01800", 6) == 0 || strncmp (vk_kern->entrypoint, "m00500", 6) == 0 || strncmp (vk_kern->entrypoint, "m00400", 6) == 0 || strncmp (vk_kern->entrypoint, "m22000", 6) == 0))
       {
-        const int args_to_dump[6] = { 0, 4, 15, 19, 17, 18 };
+        const int args_to_dump[7] = { 0, 4, 15, 19, 17, 18, 16 };
 
         fprintf (stderr, "[vkdump] %s:\n", vk_kern->entrypoint);
 
-        for (unsigned a = 0; a < 6; a++)
+        for (unsigned a = 0; a < 7; a++)
         {
           const hc_vk_buffer_t *b = (const hc_vk_buffer_t *) device_param->kernel_params[args_to_dump[a]];
 
@@ -3754,6 +3754,16 @@ int run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, con
         const hc_vk_buffer_t *pws_b = (const hc_vk_buffer_t *) device_param->kernel_params[0];
 
         fprintf (stderr, "  pw_len[0]: %08x pw_len[1]: %08x\n", ((const u32 *) pws_b->host)[64], ((const u32 *) pws_b->host)[130]);
+
+        // wpa_pbkdf2_tmp_t.out[] lives at offset 80..120 of tmps (after ipad/opad/dgst)
+
+        const hc_vk_buffer_t *tmps_b = (const hc_vk_buffer_t *) device_param->kernel_params[4];
+
+        fprintf (stderr, "  tmps.out:");
+
+        for (int i = 20; i < 30; i++) fprintf (stderr, " %08x", ((const u32 *) tmps_b->host)[i]);
+
+        fprintf (stderr, "\n");
 
         const hc_vk_buffer_t *salt_b = (const hc_vk_buffer_t *) device_param->kernel_params[17];
 
@@ -12435,6 +12445,12 @@ static bool vk_clspv_compile (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *dev
   // lets kernel sources tell the vulkan build apart (see m01800-optimized.cl)
 
   argv[argc++] = (char *) "-DIS_VULKAN";
+
+  // clspv misindexes md5_hmac_ctx_t's opad member accesses (one u32 slot):
+  // m22000-pure.cl carries a flat-md5 workaround for the WPA1 (MD5 MIC) path
+  // that is enabled only on this backend
+
+  argv[argc++] = (char *) "-DVK_FIX_WPA1_MD5";
 
   // keep plain-old-data kernel arguments out of the push constant interface and cluster
   // them into one trailing storage buffer instead: that trailing buffer is the slot we

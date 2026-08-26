@@ -71,9 +71,9 @@ fi
 
 cp -r "$IN/docs"                   "$OUT/docs"
 
-cp    "$IN/example.dict"           "$OUT/" 2>/dev/null || true
-cp    "$IN/example"[0123456789]*.hash "$OUT/" 2>/dev/null || true
-cp    "$IN/example"[0123456789]*.cmd  "$OUT/" 2>/dev/null || true
+cp    "$IN/examples/example.dict"           "$OUT/" 2>/dev/null || true
+cp    "$IN/examples/example"[0123456789]*.hash "$OUT/" 2>/dev/null || true
+cp    "$IN/examples/example"[0123456789]*.cmd  "$OUT/" 2>/dev/null || true
 
 mkdir -p "$OUT/tools"
 cp    "$IN/tools"/*hashcat.pl      "$OUT/tools/" 2>/dev/null || true

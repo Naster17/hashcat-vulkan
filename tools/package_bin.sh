@@ -64,9 +64,9 @@ cp -r $IN/tunings                       $OUT/
 
 cp -r $IN/pcfg                          $OUT/
 
-cp    $IN/example.dict                  $OUT/
-cp    $IN/example[0123456789]*.hash     $OUT/
-cp    $IN/example[0123456789]*.cmd      $OUT/
+cp    $IN/examples/example.dict         $OUT/
+cp    $IN/examples/example[0123456789]*.hash     $OUT/
+cp    $IN/examples/example[0123456789]*.cmd      $OUT/
 cp -r $IN/Python/*.py                   $OUT/Python/
 cp -r $IN/Rust/hashcat-sys/src                  $OUT/Rust/hashcat-sys/
 cp    $IN/Rust/hashcat-sys/Cargo.*              $OUT/Rust/hashcat-sys/
