@@ -1764,6 +1764,24 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
         }
       }
 
+      if (device_param->is_vulkan == true)
+      {
+        if (getenv ("HASHCAT_VK_DEBUG_PWS"))
+        {
+          const pw_t *pws_dbg = (const pw_t *) device_param->vk_d_pws_buf.host;
+
+          char pw_dbg[80] = { 0 };
+
+          const u32 pw_dbg_len = MIN (pws_dbg[0].pw_len, 72);
+
+          memcpy (pw_dbg, (const char *) pws_dbg[0].i, pw_dbg_len);
+
+          fprintf (stderr, "[vk] pre-init: pws_cnt=%llu pws[0].pw_len=%u pw='%.72s' i=[%08x %08x %08x]\n",
+                   (unsigned long long) pws_cnt, pws_dbg[0].pw_len, pw_dbg, pws_dbg[0].i[0], pws_dbg[0].i[1], pws_dbg[0].i[2]);
+          fflush (stderr);
+        }
+      }
+
       if (hashconfig->opts_type & OPTS_TYPE_INIT)
       {
         if (run_kernel (hashcat_ctx, device_param, KERN_RUN_1, pws_pos, pws_cnt, false, 0, is_autotune) == -1) return -1;
@@ -4737,6 +4755,19 @@ int run_kernel_decompress (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device
     }
 
     if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+
+    if (getenv ("HASHCAT_VK_DEBUG_PWS"))
+    {
+      const pw_t *pws = (const pw_t *) device_param->vk_d_pws_buf.host;
+
+      char pw_dbg[80] = { 0 };
+
+      memcpy (pw_dbg, (const char *) pws[0].i, 72);
+
+      fprintf (stderr, "[vk] decompress out: pws[0].pw_len=%u pw='%.72s' i=[%08x %08x %08x]\n",
+               pws[0].pw_len, pw_dbg, pws[0].i[0], pws[0].i[1], pws[0].i[2]);
+      fflush (stderr);
+    }
   }
 
   return 0;

@@ -1,0 +1,206 @@
+diff --git a/lib/BitcastUtils.cpp b/lib/BitcastUtils.cpp
+index ccf95a8..afcd924 100644
+--- a/lib/BitcastUtils.cpp
++++ b/lib/BitcastUtils.cpp
+@@ -1332,6 +1332,56 @@ bool IsClspvResourceOrLocal(Value *val) {
+   return false;
+ }
+ 
++bool CanDecomposeConstOffset(const DataLayout &DataLayout, Value *Src,
++                             Type *SrcTy, Type *DstTy, int64_t CstVal,
++                             size_t SmallerBitWidths) {
++  IRBuilder<> Builder(Src->getContext());
++
++  assert(Src->getType()->isPointerTy());
++  bool clspv_resource = IsClspvResourceOrLocal(Src);
++
++  unsigned startIdx = 0;
++  if ((isa<GlobalVariable>(Src) || clspv_resource || isa<AllocaInst>(Src)) &&
++      SrcTy != DstTy &&
++      (DstTy == nullptr ||
++       SizeInBits(DataLayout, DstTy) <= SizeInBits(DataLayout, SrcTy))) {
++    // Unsized types will be removed in `reworkUnsizedType`, no need to bump
++    // startIdx for them.
++    if (!IsUnsizedType(DataLayout, SrcTy)) {
++      startIdx = 1;
++    }
++  }
++
++  if (DstTy == nullptr || DstTy->isVoidTy()) {
++    DstTy = Builder.getInt8Ty();
++  }
++
++  unsigned steps;
++  Type *InitialSrcTy = SrcTy;
++  SrcTy = reworkUnsizedType(DataLayout, SrcTy, &steps);
++  DstTy = reworkUnsizedType(DataLayout, DstTy);
++
++  if (SizeInBits(DataLayout, DstTy) >= SizeInBits(DataLayout, SrcTy) &&
++      DstTy != SrcTy && DstTy != GetEleType(SrcTy)) {
++    DstTy = SrcTy;
++    auto ElDstTy = GetEleType(DstTy);
++    while (DstTy != ElDstTy) {
++      DstTy = ElDstTy;
++      ElDstTy = GetEleType(DstTy);
++    }
++  }
++
++  Type *Ty = SrcTy;
++  CstVal *= (int64_t)SmallerBitWidths;
++  if (startIdx == 0) {
++    auto size = SizeInBits(DataLayout, Ty);
++    CstVal %= (int64_t)size;
++  }
++  int64_t Residual = GoThroughTypeAtOffset(DataLayout, Builder, InitialSrcTy,
++                                           SrcTy, DstTy, CstVal, nullptr);
++  return Residual == 0;
++}
++
+ SmallVector<Value *, 2>
+ GetIdxsForTyFromOffset(const DataLayout &DataLayout, IRBuilder<> &Builder,
+                        Type *SrcTy, Type *DstTy, int64_t CstVal, Value *DynVal,
+diff --git a/lib/BitcastUtils.h b/lib/BitcastUtils.h
+index d029996..38c39c8 100644
+--- a/lib/BitcastUtils.h
++++ b/lib/BitcastUtils.h
+@@ -89,6 +89,13 @@ GetIdxsForTyFromOffset(const DataLayout &DataLayout, IRBuilder<> &Builder,
+                        Type *SrcTy, Type *DstTy, int64_t CstVal, Value *DynVal,
+                        size_t SmallerBitWidths, Value *Src);
+ 
++// Returns true when a constant byte offset can be fully decomposed into gep
++// indices from SrcTy down to DstTy, i.e. GetIdxsForTyFromOffset will succeed
++// on it for a constant offset.
++bool CanDecomposeConstOffset(const DataLayout &DataLayout, Value *Src,
++                             Type *SrcTy, Type *DstTy, int64_t CstVal,
++                             size_t SmallerBitWidths);
++
+ bool IsGVConstantGEP(GetElementPtrInst *GEP);
+ } // namespace BitcastUtils
+ 
+diff --git a/lib/SimplifyPointerBitcastPass.cpp b/lib/SimplifyPointerBitcastPass.cpp
+index 41c5e45..10497a8 100644
+--- a/lib/SimplifyPointerBitcastPass.cpp
++++ b/lib/SimplifyPointerBitcastPass.cpp
+@@ -232,7 +232,7 @@ bool clspv::SimplifyPointerBitcastPass::runOnGEPFromGEP(Module &M) const {
+     }
+   }
+ 
+-  const bool Changed = !WorkList.empty();
++  bool Changed = false;
+ 
+   for (GetElementPtrInst *GEP : WorkList) {
+     IRBuilder<> Builder(GEP);
+@@ -283,6 +283,12 @@ bool clspv::SimplifyPointerBitcastPass::runOnGEPFromGEP(Module &M) const {
+     }
+ 
+     SmallVector<Value *, 8> Idxs;
++    // Some gep pairs cannot be merged into a single gep that lands exactly on
++    // the source element type of the outer gep (for example when the byte
++    // offset lands inside a member smaller than the target array type).  When
++    // the decomposition is not representable we must skip the merge and leave
++    // both geps alone instead of generating wrong indices or crashing.
++    bool skip_merge = false;
+     if (OtherGEPPrevIsCstToStruct) {
+       int64_t cstVal;
+       Value *dynVal;
+@@ -300,14 +306,21 @@ bool clspv::SimplifyPointerBitcastPass::runOnGEPFromGEP(Module &M) const {
+       cstVal += smallerBitWidths2 * cstVal2;
+       smallerBitWidths = std::min(smallerBitWidths, smallerBitWidths2);
+       cstVal /= smallerBitWidths;
+-      auto newGEPIdxs = GetIdxsForTyFromOffset(
+-          M.getDataLayout(), Builder, OtherGEPPrevTy,
+-          GEP->getResultElementType(), cstVal, dynVal, smallerBitWidths,
+-          OtherGEP->getPointerOperand());
+-
+-      Idxs.append(OtherGEPIdxs);
+-      Idxs.append(
+-          SmallVector<Value *, 4>(newGEPIdxs.begin() + 1, newGEPIdxs.end()));
++      if (!BitcastUtils::CanDecomposeConstOffset(
++              M.getDataLayout(), OtherGEP->getPointerOperand(), OtherGEPPrevTy,
++              GEP->getResultElementType(), cstVal, smallerBitWidths)) {
++        skip_merge = true;
++      }
++      if (!skip_merge) {
++        auto newGEPIdxs = GetIdxsForTyFromOffset(
++            M.getDataLayout(), Builder, OtherGEPPrevTy,
++            GEP->getResultElementType(), cstVal, dynVal, smallerBitWidths,
++            OtherGEP->getPointerOperand());
++
++        Idxs.append(OtherGEPIdxs);
++        Idxs.append(
++            SmallVector<Value *, 4>(newGEPIdxs.begin() + 1, newGEPIdxs.end()));
++      }
+     } else if (GEP->hasAllConstantIndices() &&
+                OtherGEP->hasAllConstantIndices() &&
+                (GEP->getPointerAddressSpace() == clspv::AddressSpace::Private ||
+@@ -326,11 +339,19 @@ bool clspv::SimplifyPointerBitcastPass::runOnGEPFromGEP(Module &M) const {
+       cstVal = cstVal * smallerBitWidths + cstVal2 * smallerBitWidths2;
+       smallerBitWidths = std::min(smallerBitWidths, smallerBitWidths2);
+       cstVal /= smallerBitWidths;
+-      auto NewGEPIdxs = GetIdxsForTyFromOffset(
+-          M.getDataLayout(), Builder, OtherGEP->getSourceElementType(),
+-          GEP->getResultElementType(), cstVal, dynVal, smallerBitWidths,
+-          OtherGEP->getPointerOperand());
+-      Idxs.append(NewGEPIdxs);
++      if (!BitcastUtils::CanDecomposeConstOffset(
++              M.getDataLayout(), OtherGEP->getPointerOperand(),
++              OtherGEP->getSourceElementType(), GEP->getResultElementType(),
++              cstVal, smallerBitWidths)) {
++        skip_merge = true;
++      }
++      if (!skip_merge) {
++        auto NewGEPIdxs = GetIdxsForTyFromOffset(
++            M.getDataLayout(), Builder, OtherGEP->getSourceElementType(),
++            GEP->getResultElementType(), cstVal, dynVal, smallerBitWidths,
++            OtherGEP->getPointerOperand());
++        Idxs.append(NewGEPIdxs);
++      }
+     } else {
+       if (CstSrcLastIdxOp && CstGEPIdxOp &&
+           (CstSrcLastIdxOp->getZExtValue() + CstGEPIdxOp->getZExtValue() <
+@@ -413,11 +434,21 @@ bool clspv::SimplifyPointerBitcastPass::runOnGEPFromGEP(Module &M) const {
+           } else {
+             dynVal = GEPIdxOp;
+           }
+-          auto NewGEPIdxs = GetIdxsForTyFromOffset(
+-              M.getDataLayout(), Builder, OtherGEP->getSourceElementType(),
+-              OtherGEP->getResultElementType(), cstVal, dynVal,
+-              smallerBitWidths, OtherGEP->getPointerOperand());
+-          Idxs.append(NewGEPIdxs);
++          if (dynVal == nullptr &&
++              !BitcastUtils::CanDecomposeConstOffset(
++                  M.getDataLayout(), OtherGEP->getPointerOperand(),
++                  OtherGEP->getSourceElementType(),
++                  OtherGEP->getResultElementType(), cstVal,
++                  smallerBitWidths)) {
++            skip_merge = true;
++          }
++          if (!skip_merge) {
++            auto NewGEPIdxs = GetIdxsForTyFromOffset(
++                M.getDataLayout(), Builder, OtherGEP->getSourceElementType(),
++                OtherGEP->getResultElementType(), cstVal, dynVal,
++                smallerBitWidths, OtherGEP->getPointerOperand());
++            Idxs.append(NewGEPIdxs);
++          }
+         }
+       }
+ 
+@@ -426,6 +457,9 @@ bool clspv::SimplifyPointerBitcastPass::runOnGEPFromGEP(Module &M) const {
+ 
+     // Struct types require i32 indexes, so fix up any constant i64s
+     // that are safe to change
++    if (skip_merge) {
++      continue;
++    }
+     if (clspv::PointersAre64Bit(M) &&
+         OtherGEP->getSourceElementType()->isStructTy()) {
+       SmallVector<Value *, 8> NewIdxs;
+@@ -466,6 +500,8 @@ bool clspv::SimplifyPointerBitcastPass::runOnGEPFromGEP(Module &M) const {
+     // And replace the original GEP with our replacement GEP.
+     GEP->replaceAllUsesWith(NewGEP);
+ 
++    Changed = true;
++
+     // Remove the GEP as it has no users now.
+     GEP->eraseFromParent();
+ 

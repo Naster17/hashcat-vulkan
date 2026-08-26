@@ -1,0 +1,70 @@
+##
+## Debian / glibc release build.
+##
+## Same idea as Dockerfile.musl but on a Debian base, so the artifacts are
+## linked against glibc and run on any mainstream distribution. The frontend
+## and the plugins still load their OpenCL/Vulkan drivers at run time.
+##
+##   docker build -f tools/docker/Dockerfile.debian -t hashcat-build-debian .
+##   id=$(docker create hashcat-build-debian true)
+##   docker cp $id:/out/. dist/glibc && docker rm $id
+##
+
+ARG DEBIAN_VERSION=12
+
+# ---------------------------------------------------------------------------
+# Stage 1: clspv (OpenCL C -> SPIR-V compiler), built against glibc
+# ---------------------------------------------------------------------------
+
+FROM debian:${DEBIAN_VERSION}-slim AS clspv-builder
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential cmake ninja-build git python3 ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && git config --global user.email "build@localhost" \
+ && git config --global user.name "build"
+
+RUN git clone https://github.com/google/clspv /src/clspv
+
+COPY tools/docker/clspv-hashcat-m22000-fix.patch /tmp/clspv-m22000-fix.patch
+
+WORKDIR /src/clspv
+
+RUN git checkout 25c988a5053dc3c86d3be432987b1fe3ef2e7677 \
+ && git apply /tmp/clspv-m22000-fix.patch \
+ && python3 utils/fetch_sources.py --shallow \
+ && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+ && cmake --build build --target clspv
+
+# ---------------------------------------------------------------------------
+# Stage 2: hashcat itself
+# ---------------------------------------------------------------------------
+
+FROM debian:${DEBIAN_VERSION}-slim AS build
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential git xz-utils ca-certificates linux-libc-dev libvulkan-dev binutils \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY . /src
+WORKDIR /src
+
+# the Makefile expects these to exist; they are not part of the source tree
+RUN mkdir -p obj obj/contrib/minizip
+
+COPY --from=clspv-builder /src/clspv/build/bin/clspv /usr/local/bin/clspv
+
+ARG PORTABLE_VERSION=7.1.2
+ENV PORTABLE_VERSION=${PORTABLE_VERSION}
+
+RUN make -j"$(nproc)" linux SHARED=1 ENABLE_BRAIN=1 ENABLE_UNRAR=1 USE_MOLD=0 \
+ && sh tools/package_portable.sh /tmp/pkg/hashcat glibc \
+ && cp /usr/local/bin/clspv /tmp/pkg/hashcat/clspv \
+ && strip /tmp/pkg/hashcat/clspv \
+ && mkdir -p /out \
+ && tar -C /tmp/pkg -czf "/out/hashcat-${PORTABLE_VERSION}-glibc-$(uname -m).tar.gz" hashcat \
+ && mv /tmp/pkg/hashcat "/out/hashcat-${PORTABLE_VERSION}-glibc-$(uname -m)" \
+ && sha256sum /out/*.tar.gz > /out/SHA256SUMS
+
+FROM scratch AS export
+COPY --from=build /out /out/

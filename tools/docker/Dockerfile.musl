@@ -1,0 +1,77 @@
+##
+## Alpine / musl release build.
+##
+## Builds the whole release inside an Alpine container, so every artifact is
+## linked against musl regardless of what the host runs. This includes clspv,
+## which the Vulkan backend needs at run time to turn OpenCL kernels into
+## SPIR-V: it is compiled in stage 1 and shipped inside the tree next to
+## hashcat.bin (the backend picks it up automatically).
+##
+## Exported files: hashcat-<version>-musl-<arch>.tar.gz plus the unpacked tree.
+##
+##   make docker-musl          # or:
+##   docker build -f tools/docker/Dockerfile.musl -t hashcat-build-musl .
+##   id=$(docker create hashcat-build-musl true)
+##   docker cp $id:/out/. dist/musl && docker rm $id
+##
+
+ARG ALPINE_VERSION=3
+
+# ---------------------------------------------------------------------------
+# Stage 1: clspv (OpenCL C -> SPIR-V compiler), built against musl
+# ---------------------------------------------------------------------------
+
+FROM alpine:${ALPINE_VERSION} AS clspv-builder
+
+RUN apk add --no-cache build-base cmake ninja git python3 linux-headers \
+ && git config --global user.email "build@localhost" \
+ && git config --global user.name "build"
+
+COPY tools/docker/clspv-hashcat-m22000-fix.patch /tmp/clspv-m22000-fix.patch
+
+# pinned to the same clspv revision the host builds were validated against,
+# plus our fix for the SimplifyPointerBitcast crash on nested hmac ctx types
+RUN git clone https://github.com/google/clspv /src/clspv \
+ && cd /src/clspv \
+ && git checkout 25c988a5053dc3c86d3be432987b1fe3ef2e7677 \
+ && git apply /tmp/clspv-m22000-fix.patch
+
+WORKDIR /src/clspv
+
+# fetches the pinned dependencies; --shallow grabs only the pinned LLVM
+# revision instead of cloning the whole llvm-project
+RUN python3 utils/fetch_sources.py --shallow
+
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+ && cmake --build build --target clspv
+
+# ---------------------------------------------------------------------------
+# Stage 2: hashcat itself
+# ---------------------------------------------------------------------------
+
+FROM alpine:${ALPINE_VERSION} AS build
+
+RUN apk add --no-cache build-base git bash ncurses linux-headers vulkan-headers
+
+COPY . /src
+WORKDIR /src
+
+# the Makefile expects these to exist; they are not part of the source tree
+RUN mkdir -p obj obj/contrib/minizip
+
+ARG PORTABLE_VERSION=7.1.2
+ENV PORTABLE_VERSION=${PORTABLE_VERSION}
+
+COPY --from=clspv-builder /src/clspv/build/bin/clspv /usr/local/bin/clspv
+
+RUN make -j"$(nproc)" linux SHARED=1 ENABLE_BRAIN=1 ENABLE_UNRAR=1 \
+ && sh tools/package_portable.sh /tmp/pkg/hashcat musl \
+ && cp /usr/local/bin/clspv /tmp/pkg/hashcat/clspv \
+ && strip /tmp/pkg/hashcat/clspv \
+ && mkdir -p /out \
+ && tar -C /tmp/pkg -czf "/out/hashcat-${PORTABLE_VERSION}-musl-$(uname -m).tar.gz" hashcat \
+ && mv /tmp/pkg/hashcat "/out/hashcat-${PORTABLE_VERSION}-musl-$(uname -m)" \
+ && sha256sum /out/*.tar.gz > /out/SHA256SUMS
+
+FROM scratch AS export
+COPY --from=build /out /out/

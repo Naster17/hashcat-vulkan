@@ -1,0 +1,16 @@
+# keep the build context of the container releases small; the container only
+# needs the sources and data files that make linux packages anyway
+.git
+.idea
+.vscode
+obj
+*.o
+*.a
+*.so
+kernels
+dist
+hashcat
+hashcat.exe
+hashcat.bin
+hashcat.potfile
+docs/hashcat.1
