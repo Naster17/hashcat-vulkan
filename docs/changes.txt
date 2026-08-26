@@ -192,7 +192,7 @@ argument list is shown instead.
 - Feeds: Settings are written as key=value work arguments and one shared parser reads
   them, so a feed no longer writes its own (see docs/hashcat-plugin-development-guide.md)
 - PCFG: A ruleset may be one .tar.xz instead of a directory, or have any of its files
-  compressed on their own. A ruleset trained on example.dict is 3.2 MB as a directory
+  compressed on their own. A ruleset trained on examples/example.dict is 3.2 MB as a directory
   and 275 KB as one archive
 - PCFG: Naming no ruleset runs default-passwords, the one hashcat ships. Naming several
   runs them together, each with an equal share of the run unless weights= says otherwise
@@ -1991,7 +1991,7 @@ Unit tests: Updated install_modules.sh to use an external module for Digest::MD6
 - Increased the maximum size of edata2 in Kerberos 5 TGS-REP etype 23
 - Make the masks parser more restrictive by rejecting a single '?' at the end of the mask (use ?? instead)
 - Override --quiet and show final status screen in case --status is used
-- Removed duplicate words in the dictionary file example.dict
+- Removed duplicate words in the dictionary file examples/example.dict
 - Updated Intel OpenCL runtime version check
 - Work around some AMD OpenCL runtime segmentation faults
 - Work around some padding issues with host compilers and OpenCL JiT on 32 and 64-bit systems

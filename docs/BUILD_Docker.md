@@ -3,6 +3,10 @@
 To build both Linux and Windows binaries in a clean and reproducible environment a dockerfile is available.
 It is not considered to be used as a runtime OS.
 
+> Building the **Vulkan** backend inside a container (clspv + native shaders,
+> Debian and musl images) is covered separately in
+> [hashcat-vulkan.md](hashcat-vulkan.md#docker).
+
 Using the **HashcatBinaries** docker with the default settings will create a single version of hashcat, compiled with clang.
 
 ### Building ###

@@ -28,32 +28,32 @@ Since there are now multiple plugin types in hashcat, we need naming to distingu
 Typically, a feed requires a parameter to operate, and these parameters are passed from the hashcat command line to the feed. For example, the demonstration feed `feed_wordlist.so` reimplements the traditional `-a 0` attack. In classical attack-mode 0 the user specifies a path to a wordlist:
 
 ```
-./hashcat -m 0 example0.hash -a 0 example.dict
+./hashcat -m 0 examples/example0.hash -a 0 examples/example.dict
 ```
 
 In attack-mode 8 we always specify as first parameter the feed, and all other parameters are passed to the feed. So we need to write the command line like this:
 
 ```
-./hashcat -m 0 example0.hash -a 8 wordlist example.dict
+./hashcat -m 0 examples/example0.hash -a 8 wordlist examples/example.dict
 ```
 
 A feed is named, not pathed, the same way `-m 0` names a module. Hashcat looks under the `feeds/` folder of its shared directory and tries `feed_<name>`, then `rust_<name>`, then `<name>`. If none of those exist, the name is used as a path, so a feed you built yourself somewhere else still works:
 
 ```
-./hashcat -m 0 example0.hash -a 8 /tmp/myfeed.so example.dict
+./hashcat -m 0 examples/example0.hash -a 8 /tmp/myfeed.so examples/example.dict
 ```
 
-In this example, the feed handles the next parameters `example.dict`. What it does with these parameters depends entirely on the feed design. In this case, the feed opens and reads the wordlist. Another feed could instead connect to a network socket and accept an IP address, for example.
+In this example, the feed handles the next parameters `examples/example.dict`. What it does with these parameters depends entirely on the feed design. In this case, the feed opens and reads the wordlist. Another feed could instead connect to a network socket and accept an IP address, for example.
 
 The wordlist feed takes as many wordlists and directories as you give it, and lays them end to end into a single keyspace:
 
 ```
-./hashcat -m 0 example0.hash -a 8 wordlist first.dict second.dict /path/to/dictdir
+./hashcat -m 0 examples/example0.hash -a 8 wordlist first.dict second.dict /path/to/dictdir
 ```
 
 A directory contributes the files directly inside it, in name order. Because this is one keyspace rather than one attack per file, `--skip` and `--limit` keep working across the whole set. Attack-mode 0 has to refuse them as soon as it is given more than one dictionary.
 
-The status display names the feed on the `Guess.Base` line. A feed may name what it is generating from rather than itself, so the wordlist feed shows `Guess.Base.......: Feed (example.dict)`.
+The status display names the feed on the `Guess.Base` line. A feed may name what it is generating from rather than itself, so the wordlist feed shows `Guess.Base.......: Feed (examples/example.dict)`.
 
 Keep in mind that hashcat always parses the full command line first. All options are interpreted by hashcat's getopt process, and only the `loose parameters` are forwarded to the feed.
 
@@ -128,20 +128,20 @@ rm -rf kernels hashcat.dictstat2 seekdbs
 Next, rebuild the caching databases for both attack modes, creating a realistic environment:
 
 ```
-./hashcat -m 900 --force -u 1 -n 1024 -T 32 example0.hash -d 1,2 $HOME/dict/hashmob.net_2025-07-06.found
-./hashcat -m 900 --force -u 1 -n 1024 -T 32 example0.hash -d 1,2 -a8 feeds/feed_wordlist.so $HOME/dict/hashmob.net_2025-07-06.found
+./hashcat -m 900 --force -u 1 -n 1024 -T 32 examples/example0.hash -d 1,2 $HOME/dict/hashmob.net_2025-07-06.found
+./hashcat -m 900 --force -u 1 -n 1024 -T 32 examples/example0.hash -d 1,2 -a8 feeds/feed_wordlist.so $HOME/dict/hashmob.net_2025-07-06.found
 ```
 
 Now compare runtimes (run each command twice to account for OS-level caching):
 
 ```
-time ./hashcat -m 900 --self-test-disable --force -u 1 -n 1024 -T 32 example0.hash -d 1,2 -a0 $HOME/dict/hashmob.net_2025-07-06.found
+time ./hashcat -m 900 --self-test-disable --force -u 1 -n 1024 -T 32 examples/example0.hash -d 1,2 -a0 $HOME/dict/hashmob.net_2025-07-06.found
 
 real    0m53.462s
 user    1m28.619s
 sys     0m6.824s
 
-time ./hashcat -m 900 --self-test-disable --force -u 1 -n 1024 -T 32 example0.hash -d 1,2 -a8 feeds/feed_wordlist.so $HOME/dict/hashmob.net_2025-07-06.found
+time ./hashcat -m 900 --self-test-disable --force -u 1 -n 1024 -T 32 examples/example0.hash -d 1,2 -a8 feeds/feed_wordlist.so $HOME/dict/hashmob.net_2025-07-06.found
 
 real    0m29.901s
 user    0m48.229s

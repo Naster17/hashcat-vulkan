@@ -2,6 +2,28 @@
 
 **hashcat** is the world's fastest and most advanced password recovery utility, supporting five unique modes of attack for over 300 highly-optimized hashing algorithms. hashcat currently supports CPUs, GPUs, and other hardware accelerators on Linux, Windows, and macOS, and has facilities to help enable distributed password cracking.
 
+### Vulkan Compute Backend ###
+
+This branch (**`vulkan-native`**) adds a native **Vulkan** compute backend. Vulkan-capable GPUs are detected automatically and used just like OpenCL devices (pick them with `-d`, hide other APIs with `--backend-ignore-opencl`, …).
+
+Hashcat runs its kernels on Vulkan in one of two ways:
+
+* **Default — clspv translation.** The existing OpenCL C kernel is translated to SPIR-V *at kernel-load time* by the external [`clspv`](https://github.com/google/clspv) compiler. No changes to the kernel sources are required.
+* **`--native-vulkan` — hand-written shaders.** Where a hand-written native Vulkan GLSL shader is available (currently mode 22000 / WPA-PBKDF2-PMKID), it is loaded pre-compiled as a `.vksprv` module *instead of* the clspv-translated one, giving higher GPU utilization through GPU-side transfers and pipelined dispatch. All other modes fall back to the clspv pipeline transparently.
+
+Quick start:
+
+```bash
+$ make                                    # no Vulkan SDK needed to build
+$ ./hashcat -d 1 --native-vulkan -m 22000 -a 3 ...   # pure Vulkan, native shader
+```
+
+Documentation:
+
+* [docs/hashcat-vulkan.md](docs/hashcat-vulkan.md) — design, build, Docker, troubleshooting
+* [docs/NATIVE_SUPPORT.md](docs/NATIVE_SUPPORT.md) — per-mode native shader matrix
+* [docs/BUILD.md](docs/BUILD.md) — "Building hashcat with the Vulkan backend"
+
 ### License ###
 
 **hashcat** is licensed under the MIT license. Refer to [docs/license.txt](docs/license.txt) for more information.
@@ -18,7 +40,7 @@ Please refer to the [Hashcat Wiki](https://hashcat.net/wiki/) and the output of 
 
 ### Building ###
 
-Refer to [BUILD.md](BUILD.md) for instructions on how to build **hashcat** from source.
+Refer to [docs/BUILD.md](docs/BUILD.md) for instructions on how to build **hashcat** from source.
 
 Tests:
 

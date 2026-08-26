@@ -261,7 +261,7 @@ CC_WIN                  := x86_64-w64-mingw32-gcc
 CXX_WIN                 := x86_64-w64-mingw32-g++
 AR_WIN                  := x86_64-w64-mingw32-ar
 
-# See BUILD_WSL.md to make these
+# See docs/BUILD_WSL.md to make these
 WIN_ICONV               := /opt/win-iconv-64
 WIN_PYTHON              := /opt/win-python
 

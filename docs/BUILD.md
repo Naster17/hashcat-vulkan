@@ -6,7 +6,7 @@
 
 ---
 
-## ✅ Requirements
+##  Requirements
 
 - **Python 3.12** or higher
 
@@ -23,9 +23,9 @@ If you can't install Python ≥ 3.12 globally, you can use **pyenv**.
 
 ---
 
-## 🛠️ Building Hashcat – Step-by-Step
+##  Building Hashcat – Step-by-Step
 
-### 🔹 Step 1: Install dependencies and pyenv
+###  Step 1: Install dependencies and pyenv
 
 #### On Linux
 
@@ -53,7 +53,7 @@ $ brew install pyenv
 
 ---
 
-### 🔹 Step 2: Install Python using pyenv
+###  Step 2: Install Python using pyenv
 
 Install Python 3.12 (or newer):
 
@@ -72,7 +72,7 @@ $ pyenv versions
 
 ---
 
-### 🔹 Step 3: Clone the Hashcat repository
+###  Step 3: Clone the Hashcat repository
 
 ```bash
 $ git clone https://github.com/hashcat/hashcat.git
@@ -81,7 +81,7 @@ $ cd hashcat
 
 ---
 
-### 🔹 Step 4: Set the local Python version
+###  Step 4: Set the local Python version
 
 ```bash
 $ pyenv local 3.12.11
@@ -89,7 +89,7 @@ $ pyenv local 3.12.11
 
 ---
 
-### 🔹 Step 5: Build Hashcat
+###  Step 5: Build Hashcat
 
 ```bash
 $ make clean && make
@@ -103,7 +103,7 @@ core.
 
 ---
 
-### 🔹 Step 6 (Optional): Check the build
+###  Step 6 (Optional): Check the build
 
 ```bash
 $ tools/test_package.sh
@@ -117,7 +117,7 @@ out.
 
 ---
 
-### 🔹 Step 7 (Optional): Install Hashcat (Linux only)
+###  Step 7 (Optional): Install Hashcat (Linux only)
 
 ```bash
 $ make install
@@ -133,19 +133,19 @@ Hashcat will use the following locations depending on your environment:
 | None of the above                          | `$HOME/.local/share/hashcat/sessions/` | `$HOME/.cache/hashcat/`               | `$HOME/.local/share/hashcat/`          |
 
 ---
-## 🔥 Building Hashcat for Android
+##  Building Hashcat for Android
 
 See: [BUILD_Android.md](BUILD_Android.md)
 
 ---
 
-## 🐳 Building Hashcat with Docker
+##  Building Hashcat with Docker
 
 See: [BUILD_Docker.md](BUILD_Docker.md)
 
 ---
 
-## 🪟 Building Hashcat for Windows
+##  Building Hashcat for Windows
 
 | Method                                 | Documentation                        |
 |----------------------------------------|--------------------------------------|
@@ -163,6 +163,61 @@ the core.
 
 ---
 
-## 🎉 Done
+## Building hashcat with the Vulkan backend
 
-Enjoy your fresh **Hashcat** binaries! 😎
+This fork adds a native Vulkan compute backend. The short version:
+
+1. Build the binary exactly as upstream (`make`) — no Vulkan SDK is required to
+   compile, because `ext_vulkan.c` loads `libvulkan.so.1` at runtime via `dlopen`.
+2. At runtime you need a Vulkan driver/loader and (for the default pipeline) the
+   `clspv` compiler. The optional native shaders are already checked in under
+   `OpenCL/native/`.
+
+### What to download / install
+
+| Component | Needed for | How to get it |
+|-----------|------------|---------------|
+| Vulkan loader + ICD | Running on any Vulkan GPU | Distro package, e.g. `apt install vulkan-tools libvulkan1 mesa-vulkan-drivers` (verify with `vulkaninfo`). |
+| `clspv` | Default OpenCL-C -> SPIR-V translation | Build from https://github.com/google/clspv (needs LLVM), or drop a prebuilt `clspv` next to the `hashcat` binary. Point hashcat at it with `HASHCAT_CLSPV=/path/clspv`. |
+| glslang + SPIRV-Tools | Rebuilding the native `.vksprv` shaders only | Distro packages `glslang-tools spirv-tools` (provides `glslangValidator`, `spirv-dis`, `spirv-as`, `spirv-link`, `spirv-val`), or the Vulkan SDK. |
+| Python 3 | Rebuilding native shaders (`tools/vknative-build.py`) | Already required to build hashcat. |
+
+### Build
+
+```bash
+$ make clean && make
+```
+
+The Vulkan code is compiled into `libhashcat`/`hashcat`; nothing else changes
+compared to the generic build. To *run* on Vulkan you only need `libvulkan.so.1`
+present; for the default (non-native) pipeline also have `clspv` reachable as
+described above.
+
+### Run
+
+```bash
+# pure-Vulkan on device #1, native shaders (mode 22000)
+$ ./hashcat -d 1 --native-vulkan -m 22000 -a 3 ...
+
+# auto-detected Vulkan, default clspv translation, ignore OpenCL
+$ ./hashcat --backend-ignore-opencl -m 0 ...
+```
+
+Use `-I` to list the detected Vulkan devices. Native shaders currently exist for
+mode 22000; every other mode transparently uses the clspv-translated path (see
+[NATIVE_SUPPORT.md](NATIVE_SUPPORT.md)).
+
+### Rebuild the native shaders (optional)
+
+```bash
+$ tools/vknative-build.py      # regenerates OpenCL/native/m22000-pure.vksprv
+```
+
+Full design, all environment variables and the Docker setup are in
+[hashcat-vulkan.md](hashcat-vulkan.md).
+
+---
+
+## Done
+
+Enjoy your fresh **Hashcat** binaries!

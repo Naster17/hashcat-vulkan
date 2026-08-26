@@ -20,7 +20,7 @@ $ wc -l pattern.rule
 Since the total number of candidates is ([number-of-words-from-wordlist] * [number-of-rules]), this attack should theoretically be enough to fully feed all GPU compute units. But in practice, hashcat works differently internally - mostly to deal with fast hashes. This makes the performance of such an attack terrible:
 
 ```
-$ ./hashcat -m 400 example400.hash wordlist.txt -r pattern.rule --speed-only
+$ ./hashcat -m 400 examples/example400.hash wordlist.txt -r pattern.rule --speed-only
 ...
 Speed.#2.........:      145 H/s (0.07ms)
 ```
@@ -30,7 +30,7 @@ This is where slow candidates comes into play. To feed the GPU compute units mor
 Here's the exact same attack, but using the new -S option to turn on slow candidates:
 
 ```
-$ ./hashcat -m 400 example400.hash wordlist.txt -r pattern.rule --speed-only -S
+$ ./hashcat -m 400 examples/example400.hash wordlist.txt -r pattern.rule --speed-only -S
 ...
 Speed.#2.........:   361.3 kH/s (3.54ms)
 ```

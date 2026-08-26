@@ -13,7 +13,7 @@ environment:
       BASH: C:\cygwin\bin\bash
       CC: gcc
     # Disable MINGW test. It seems AppVeyor is no longer supporting MSYS2. Not a hashcat problem.
-    # See BUILD_MSYS2.md for local test
+    # See docs/BUILD_MSYS2.md for local test
     #- MSYSTEM: MINGW64
     #  MSYS_CACHE: C:\msys64\var\cache\pacman\pkg
     #  BASH: C:\msys64\usr\bin\bash

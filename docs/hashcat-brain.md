@@ -24,10 +24,10 @@ Before you try it out yourself, let me show you a few examples.
 
 There's no doubt that rule-based attacks are the greatest general purpose attack-modifier on an existing wordlist. But they have a little-known problem: They produce a lot of duplicate candidates. While this is not relevant for fast hashes, it has a large impact on slow hashes.
 
-In this example, we apply best66.rule to example.dict, and writes the result to test.txt:
+In this example, we apply best66.rule to examples/example.dict, and writes the result to test.txt:
 
 ```
-$ ./hashcat --stdout example.dict -r rules/best66.rule -o test.txt
+$ ./hashcat --stdout examples/example.dict -r rules/best66.rule -o test.txt
 ```
 
 Now we can see how many candidates were produced:
@@ -47,7 +47,7 @@ $ sort -u test.txt | wc -l
 Of course, the wordlist and rules used have a large impact on the number of duplicates. In our example - a common wordlist and general purpose rule - the average ratio of produced dupes seems to be around 25%. And all of these dupes are detected by the brain:
 
 ```
-$ ./hashcat -z example0.hash example.dict -r rules/best66.rule
+$ ./hashcat -z examples/example0.hash examples/example.dict -r rules/best66.rule
 ...
 Rejected.........: 2379391/9888032 (24.06%)
 ```
@@ -326,12 +326,12 @@ Brain.Rejects....: 128416 (position 128416, candidate 0)
 __Position__ is the "attacks" feature skipping a range of the keyspace, and __candidate__ is the "hashes" feature dropping a word the brain had already seen. Which of the two moves tells you which feature is earning its keep, and that is worth knowing because they cost wildly different amounts of network. Here is the same attack, the same 128,416 candidates and the same 100% rejection, run once under each feature:
 
 ```
-$ ./hashcat -z -m 0 --brain-client-features 2 example0.hash example.dict
+$ ./hashcat -z -m 0 --brain-client-features 2 examples/example0.hash examples/example.dict
 Rejected.........: 128416/128416 (100.00%)
 Brain.Link.All...: RX: 0 B, TX: 32 B
 Brain.Rejects....: 128416 (position 128416, candidate 0)
 
-$ ./hashcat -z -m 0 --brain-client-features 1 example0.hash example.dict
+$ ./hashcat -z -m 0 --brain-client-features 1 examples/example0.hash examples/example.dict
 Rejected.........: 128416/128416 (100.00%)
 Brain.Link.All...: RX: 128.5 kB, TX: 1.0 MB
 Brain.Rejects....: 128416 (position 0, candidate 128416)
@@ -352,7 +352,7 @@ It reads candidates from stdin and nothing else, because hashcat already knows h
 ```
 $ ./hashcat --brain-server --brain-password mypassword &
 
-$ ./hashcat --stdout example.dict -r rules/best66.rule | ./hashcat --brain-feed --brain-password mypassword --brain-session 0x1234abcd
+$ ./hashcat --stdout examples/example.dict -r rules/best66.rule | ./hashcat --brain-feed --brain-password mypassword --brain-session 0x1234abcd
 Feeding brain session 0x1234abcd, reading candidates from stdin.
 
 Fed 8475456 candidates from 8475456 lines into brain session 0x1234abcd, 1632491 were already known.
@@ -360,7 +360,7 @@ Fed 8475456 candidates from 8475456 lines into brain session 0x1234abcd, 1632491
 
 That is the real output of that exact command. A few things are worth reading out of it.
 
-The 8,475,456 lines are what `example.dict` and `best66.rule` produce together, and all of them were fed. 8,515 of them are empty, which some rules legitimately produce, and those are fed too, because the wordlist reader accepts an empty candidate and so a cracking client will ask about one.
+The 8,475,456 lines are what `examples/example.dict` and `best66.rule` produce together, and all of them were fed. 8,515 of them are empty, which some rules legitimately produce, and those are fed too, because the wordlist reader accepts an empty candidate and so a cracking client will ask about one.
 
 Of the whole set, 1,632,491 were reported as already known while the feed was still running. Nothing had been fed before, so those are the rule engine's own duplicates being caught as they arrive, which is the same 20 to 25 percent seen in the first example on this page. Note that 8,514 of them are the empty candidates: every one of those lines is the same candidate, so only the first is new. The 6,842,965 that remain are the unique candidates now in the brain.
 

@@ -111,12 +111,12 @@ ruleset from the trainer also has `Prince`, `Masks`, `Emails` and `Websites` dir
 `config.ini`. hashcat ignores those, so you can delete them if you want the ruleset smaller.
 
 A ruleset does not have to be a directory. The whole of it in one `.tar.xz` works wherever a ruleset
-is named, and a ruleset trained on `example.dict` is 3.2 MB as a directory and 275 KB as one file:
+is named, and a ruleset trained on `examples/example.dict` is 3.2 MB as a directory and 275 KB as one file:
 
 ```
 tar cf - -C /path/to/ruleset . | xz -9 > ruleset.tar.xz
 
-./hashcat -m 0 -a 4 example0.hash ruleset.tar.xz
+./hashcat -m 0 -a 4 examples/example0.hash ruleset.tar.xz
 ```
 
 A `./` in front of every member, or one directory every member shares, is stripped, so it does not
@@ -135,7 +135,7 @@ find /path/to/ruleset -type f -exec xz -9 {} +
 PCFG is attack-mode 4, and it needs nothing but a hash file:
 
 ```
-./hashcat -m 0 -a 4 example0.hash
+./hashcat -m 0 -a 4 examples/example0.hash
 ```
 
 That runs the ruleset hashcat ships as its default, which is trained on passwords.
@@ -143,7 +143,7 @@ That runs the ruleset hashcat ships as its default, which is trained on password
 To use your own instead, name it after the hash file:
 
 ```
-./hashcat -m 0 -a 4 example0.hash /path/to/ruleset
+./hashcat -m 0 -a 4 examples/example0.hash /path/to/ruleset
 ```
 
 Name several and they run together, each with an equal share of the run. Merging rulesets that know
@@ -154,7 +154,7 @@ A ruleset that is installed, whether hashcat's or your own, is named rather than
 `-m 0` names a hash mode and `-a 8 wordlist` names a feed:
 
 ```
-./hashcat -m 0 -a 4 example0.hash example
+./hashcat -m 0 -a 4 examples/example0.hash example
 ```
 
 A name is looked for in two places, yours first:
@@ -186,13 +186,13 @@ tool that builds one, so the text is yours to fetch and the ruleset is yours to 
 Name your own beside the shipped one and both run:
 
 ```
-./hashcat -m 0 -a 4 example0.hash default-passwords my-russian
+./hashcat -m 0 -a 4 examples/example0.hash default-passwords my-russian
 ```
 
 Two rulesets get an even split. Weight it toward whichever you trust more:
 
 ```
-./hashcat -m 0 -a 4 example0.hash default-passwords my-russian weights=2:1
+./hashcat -m 0 -a 4 examples/example0.hash default-passwords my-russian weights=2:1
 ```
 
 What runs underneath is a feed for attack-mode 8, which is hashcat's mode for a generator plugin, and
@@ -201,7 +201,7 @@ What runs underneath is a feed for attack-mode 8, which is hashcat's mode for a 
 is the same attack, so a script written before `-a 4` existed keeps running:
 
 ```
-./hashcat -m 0 -a 8 example0.hash pcfg /path/to/ruleset
+./hashcat -m 0 -a 8 examples/example0.hash pcfg /path/to/ruleset
 ```
 
 Everything below is written in the short form.
@@ -212,7 +212,7 @@ Here is a real run against hashcat's own example hashes, stopped after twenty se
 Session..........: hashcat
 Status...........: Aborted (Runtime)
 Hash.Mode........: 0 (MD5)
-Hash.Target......: example0.hash
+Hash.Target......: examples/example0.hash
 Time.Started.....: Sun Aug 23 17:08:57 2026 (20 secs)
 Speed.#01........: 13369.7 MH/s (12.26ms) @ Accel:38 Loops:1024 Thr:64 Vec:1
 Speed.#02........: 12525.9 MH/s (13.06ms) @ Accel:38 Loops:1024 Thr:64 Vec:1
@@ -230,7 +230,7 @@ thousand. That ratio is what a PCFG is for.
 The passwords it finds look like what the grammar describes:
 
 ```
-$ ./hashcat -m 0 -a 4 example0.hash --limit 50000 --quiet --potfile-disable --outfile-format 2
+$ ./hashcat -m 0 -a 4 examples/example0.hash --limit 50000 --quiet --potfile-disable --outfile-format 2
 grace2010
 rocky2009
 findus123
@@ -291,7 +291,7 @@ Settings are `key=value` arguments after the ruleset path, the same convention e
 feed uses:
 
 ```
-./hashcat -m 0 -a 4 example0.hash /path/to/ruleset scale=4 costmax=48
+./hashcat -m 0 -a 4 examples/example0.hash /path/to/ruleset scale=4 costmax=48
 ```
 
 Most people never need any of them.
@@ -323,7 +323,7 @@ notices.
 You can give several ruleset directories at once:
 
 ```
-./hashcat -m 0 -a 4 example0.hash /path/to/names /path/to/rockyou
+./hashcat -m 0 -a 4 examples/example0.hash /path/to/names /path/to/rockyou
 ```
 
 They become **one grammar**, not two attacks run back to back. Every probability in the result is the
@@ -339,7 +339,7 @@ available over the words the name ruleset learned, and it can.
 same thing:
 
 ```
-./hashcat -m 0 -a 4 example0.hash /path/to/names /path/to/rockyou weights=1:3
+./hashcat -m 0 -a 4 examples/example0.hash /path/to/names /path/to/rockyou weights=1:3
 ```
 
 An even split is the default and it is often not what you want. Merging in a ruleset that describes
@@ -428,7 +428,7 @@ and `--skip`, `--limit`, `--restore`, splitting one attack across several GPUs, 
 those need a keyspace with a fixed order and a way to jump into the middle of it.
 
 ```
-./hashcat -m 0 -a 4 example0.hash /path/to/ruleset --skip 1000000 --limit 200000
+./hashcat -m 0 -a 4 examples/example0.hash /path/to/ruleset --skip 1000000 --limit 200000
 ```
 
 ### 6.2. The price is that the ordering is approximate

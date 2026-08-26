@@ -26,7 +26,7 @@ Use 4096 bits. Hashcat rejects anything smaller, and the error message explains 
 
 ### Step 2: The operator cracks the hash
 
-You received two things from the customer: `public.pem` and the hash itself. Put the hash in a file. This one is taken from hashcat's own `example0.hash`, so you can follow along:
+You received two things from the customer: `public.pem` and the hash itself. Put the hash in a file. This one is taken from hashcat's own `examples/example0.hash`, so you can follow along:
 
 ```
 $ echo e11c594e6a2f4eb499cceadfca988595 > one.hash
@@ -35,7 +35,7 @@ $ echo e11c594e6a2f4eb499cceadfca988595 > one.hash
 Now run hashcat as usual, and add `--encrypt-with-pubkey`:
 
 ```
-$ ./hashcat -m 0 -a 0 one.hash example.dict --encrypt-with-pubkey=public.pem -o cracked.txt
+$ ./hashcat -m 0 -a 0 one.hash examples/example.dict --encrypt-with-pubkey=public.pem -o cracked.txt
 Status...........: Cracked
 Hash.Mode........: 0 (MD5)
 Hash.Target......: e11c594e6a2f4eb499cceadfca988595

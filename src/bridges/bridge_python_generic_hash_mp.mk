@@ -64,6 +64,6 @@ bridges/bridge_python_generic_hash_mp.dll:
 	@echo "$(RED)WARNING$(RESET): Skipping regular plugin 73000: Python Windows headers not found."
 	@echo "         To use -m 73000, you must install the required Python headers."
 	@echo "         Otherwise, you can safely ignore this warning."
-	@echo "         See BUILD_WSL.md how to prepare $(WIN_PYTHON)."
+	@echo "         See docs/BUILD_WSL.md how to prepare $(WIN_PYTHON)."
 	@echo ""
 endif

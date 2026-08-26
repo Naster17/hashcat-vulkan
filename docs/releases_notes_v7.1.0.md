@@ -124,7 +124,7 @@ We now show a single warning instead of waiting. The user is informed about the 
 
 This change adds an early syntax check for -j and -k rules. If an invalid rule is detected, hashcat now prints a clear error message and stops immediately, avoiding the misleading error:
 
-  `example.dict: empty file`
+  `examples/example.dict: empty file`
 
 Example of new behavior:
 
