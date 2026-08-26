@@ -43,6 +43,21 @@ typedef struct hc_vk_slot
   int             submitted;   // fence may still be pending
   int             ts_pending;  // this slot submitted a timestamp pair not yet read
 
+  // slot-owned descriptor set: a dispatch about to reuse this slot has already
+  // waited on its fence, so its set can be rewritten without touching the
+  // other slot's in-flight work
+
+  VkDescriptorSet dset;
+  int             dset_valid;
+
+  // slot-owned copy of the caller's scalar/POD argument buffer: the buffer the
+  // caller hands out (vk_d_kernel_param) is overwritten by the next launch
+  // while this dispatch may still be reading it, so every submission reads a
+  // stable private snapshot
+
+  hc_vk_buffer_t  pod_buf;
+  int             pod_ready;
+
 } hc_vk_slot_t;
 
 // dispatches use two command buffers in rotation: the host records the next
@@ -63,10 +78,10 @@ typedef struct hc_vk_kernel
   // fixed objects, created once per kernel slot
 
   VkDevice               device;
+  VkPhysicalDevice       phys;
   VkDescriptorSetLayout  dslayout;
   VkDescriptorPool       pool;
   VkPipelineLayout       layout;
-  VkDescriptorSet        dset;
 
   VkCommandPool          cmdpool;
 
@@ -232,7 +247,7 @@ int hc_vkSetKernelArg (void *hashcat_ctx, vk_kernel kernel, uint32_t index, hc_v
 int hc_vkQueueIdle (void *hashcat_ctx, VkQueue queue);
 
 int hc_vkDispatch (void *hashcat_ctx, VkQueue queue, vk_kernel kernel,
-                   uint64_t gx, uint64_t gy, const void *pod_data, double *exec_ms);
+                   uint64_t gx, uint64_t gy, hc_vk_buffer_t *pod_buffer, double *exec_ms);
 
 // native fills, host side (buffers are persistently mapped)
 

@@ -696,6 +696,7 @@ int hc_vkKernelInit (void *hashcat_ctx, VkDevice device, VkPhysicalDevice phys, 
   if (k == NULL) return -1;
 
   k->device = device;
+  k->phys   = phys;
 
   *kernel = k;
 
@@ -737,13 +738,13 @@ int hc_vkKernelInit (void *hashcat_ctx, VkDevice device, VkPhysicalDevice phys, 
   VkDescriptorPoolSize ps =
   {
     .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-    .descriptorCount = HC_VK_MAX_BINDINGS
+    .descriptorCount = HC_VK_MAX_BINDINGS * HC_VK_SLOTS
   };
 
   VkDescriptorPoolCreateInfo pci =
   {
     .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-    .maxSets = 1,
+    .maxSets = HC_VK_SLOTS,
     .poolSizeCount = 1,
     .pPoolSizes = &ps
   };
@@ -757,21 +758,37 @@ int hc_vkKernelInit (void *hashcat_ctx, VkDevice device, VkPhysicalDevice phys, 
     return -1;
   }
 
+  VkDescriptorSetLayout dlayouts[HC_VK_SLOTS];
+
+  for (int i = 0; i < HC_VK_SLOTS; i++)
+  {
+    dlayouts[i] = k->dslayout;
+  }
+
+  VkDescriptorSet dsets[HC_VK_SLOTS];
+
   VkDescriptorSetAllocateInfo dsai =
   {
     .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
     .descriptorPool = k->pool,
-    .descriptorSetCount = 1,
-    .pSetLayouts = &k->dslayout
+    .descriptorSetCount = HC_VK_SLOTS,
+    .pSetLayouts = dlayouts
   };
 
-  rc = vk->vkAllocateDescriptorSets (device, &dsai, &k->dset);
+  rc = vk->vkAllocateDescriptorSets (device, &dsai, dsets);
 
   if (rc != VK_SUCCESS)
   {
     event_log_error (hashcat_ctx, "vkAllocateDescriptorSets(): %s", vk_result_string (rc));
 
     return -1;
+  }
+
+  for (int i = 0; i < HC_VK_SLOTS; i++)
+  {
+    k->slots[i].dset       = dsets[i];
+    k->slots[i].dset_valid = 0;
+    k->slots[i].pod_ready  = 0;
   }
 
   VkPipelineLayoutCreateInfo plci =
@@ -936,6 +953,8 @@ int hc_vkKernelTerm (void *hashcat_ctx, vk_kernel k)
   for (int i = 0; i < HC_VK_SLOTS; i++)
   {
     if (k->slots[i].fence != VK_NULL_HANDLE) vk->vkDestroyFence (k->device, k->slots[i].fence, NULL);
+
+    if (k->slots[i].pod_ready != 0) hc_vkBufferFree (hashcat_ctx, &k->slots[i].pod_buf);
   }
 
   if (k->cmdpool != VK_NULL_HANDLE) vk->vkDestroyCommandPool (k->device, k->cmdpool, NULL);
@@ -1064,6 +1083,13 @@ int hc_vkKernelCompile (void *hashcat_ctx, vk_kernel k, vk_program program, hc_v
 
   k->dirty = 1;
 
+  // the ordinal -> binding map changed: every slot's descriptor set is stale
+
+  for (int i = 0; i < HC_VK_SLOTS; i++)
+  {
+    k->slots[i].dset_valid = 0;
+  }
+
   return 0;
 }
 
@@ -1084,6 +1110,13 @@ int hc_vkSetKernelArg (void *hashcat_ctx, vk_kernel k, uint32_t index, hc_vk_buf
   {
     k->bindings[index] = value->buffer;
     k->dirty = 1;
+
+    // every slot's descriptor set holds its own copy of the bindings
+
+    for (int i = 0; i < HC_VK_SLOTS; i++)
+    {
+      k->slots[i].dset_valid = 0;
+    }
   }
 
   return 0;
@@ -1132,9 +1165,11 @@ static void vk_slot_read_timestamps (VK_PTR *vk, vk_kernel k, hc_vk_slot_t *s, d
   }
 }
 
-// wait for all in-flight slots of a kernel (used before touching a descriptor
-// set that an earlier submission may still be executing)
+// wait for all in-flight slots of a kernel. no longer used by the dispatch
+// path (descriptor sets are slot-owned now), kept for callers that need to
+// drain a kernel completely.
 
+MAYBE_UNUSED
 static int vk_kernel_wait_slots (VK_PTR *vk, vk_kernel k, void *hashcat_ctx)
 {
   for (int i = 0; i < HC_VK_SLOTS; i++)
@@ -1156,7 +1191,7 @@ static int vk_kernel_wait_slots (VK_PTR *vk, vk_kernel k, void *hashcat_ctx)
   return 0;
 }
 
-int hc_vkDispatch (void *hashcat_ctx, VkQueue queue, vk_kernel k, uint64_t gx, uint64_t gy, const void *pod_data, double *exec_ms)
+int hc_vkDispatch (void *hashcat_ctx, VkQueue queue, vk_kernel k, uint64_t gx, uint64_t gy, hc_vk_buffer_t *pod_buffer, double *exec_ms)
 {
   VK_PTR *vk = ((hashcat_ctx_t *) hashcat_ctx)->backend_ctx->vk;
 
@@ -1182,14 +1217,14 @@ int hc_vkDispatch (void *hashcat_ctx, VkQueue queue, vk_kernel k, uint64_t gx, u
   {
     fprintf (stderr, "[vkpod] %s:", k->entrypoint);
 
-    if (pod_data != NULL)
+    if (pod_buffer != NULL && pod_buffer->host != NULL)
     {
-      const uint64_t *p = (const uint64_t *) pod_data;
+      const uint64_t *p = (const uint64_t *) pod_buffer->host;
 
       fprintf (stderr, " off=%llu len32=%08x %08x %08x %08x gid=%llu",
                (unsigned long long) p[0],
-               ((const unsigned int *) pod_data)[2], ((const unsigned int *) pod_data)[3],
-               ((const unsigned int *) pod_data)[4], ((const unsigned int *) pod_data)[5],
+               ((const unsigned int *) pod_buffer->host)[2], ((const unsigned int *) pod_buffer->host)[3],
+               ((const unsigned int *) pod_buffer->host)[4], ((const unsigned int *) pod_buffer->host)[5],
                (unsigned long long) p[4]);
     }
 
@@ -1211,6 +1246,8 @@ int hc_vkDispatch (void *hashcat_ctx, VkQueue queue, vk_kernel k, uint64_t gx, u
 
   const int blocking = (getenv ("HASHCAT_VK_SYNC") != NULL) || (vk->async_enabled == 0);
 
+  hc_vk_slot_t *slot = &k->slots[k->slot_next];
+
   if (blocking)
   {
     vk->vkQueueWaitIdle (queue);
@@ -1220,11 +1257,9 @@ int hc_vkDispatch (void *hashcat_ctx, VkQueue queue, vk_kernel k, uint64_t gx, u
     // pipelined: only wait for the fence of the slot we are about to reuse,
     // which the GPU finished working through some kernels ago
 
-    hc_vk_slot_t *s = &k->slots[k->slot_next];
-
-    if (s->submitted)
+    if (slot->submitted)
     {
-      VkResult rc = vk->vkWaitForFences (k->device, 1, &s->fence, VK_TRUE, 10ull * 1000ull * 1000ull * 1000ull);
+      VkResult rc = vk->vkWaitForFences (k->device, 1, &slot->fence, VK_TRUE, 10ull * 1000ull * 1000ull * 1000ull);
 
       if (rc != VK_SUCCESS)
       {
@@ -1239,25 +1274,59 @@ int hc_vkDispatch (void *hashcat_ctx, VkQueue queue, vk_kernel k, uint64_t gx, u
         return -1;
       }
 
-      s->submitted = 0;
+      slot->submitted = 0;
     }
 
     // the work this slot previously carried finished: harvest its timestamps as
     // the (deferred) exec time for this kernel. first dispatches have no history,
     // so callers see 0 until one full slot rotation has gone by.
 
-    if (s->ts_pending)
+    if (slot->ts_pending)
     {
-      vk_slot_read_timestamps (vk, k, s, exec_ms);
+      vk_slot_read_timestamps (vk, k, slot, exec_ms);
 
-      s->ts_pending = 0;
+      slot->ts_pending = 0;
     }
   }
 
-  // update descriptors if any binding changed since the last dispatch. the set
-  // may still be referenced by an in-flight cmdbuf of the other slot -> drain first
+  // snapshot the caller's scalar/POD argument buffer into this slot's private
+  // copy. the buffer kernels read scalar arguments from (vk_d_kernel_param)
+  // is refilled by the very next launch, so an in-flight dispatch would race
+  // its own update: this is what made slow-hash kernel runs read half-written
+  // loop_pos/loop_cnt values. every ordinal bound to that buffer is pointed
+  // at the slot copy below.
 
-  if (k->dirty && getenv ("HASHCAT_VK_DEBUG") && k->entrypoint && strstr (k->entrypoint, "aux2"))
+  int pod_present = 0;
+
+  if ((pod_buffer != NULL) && (pod_buffer->buffer != VK_NULL_HANDLE) && (pod_buffer->host != NULL))
+  {
+    for (uint32_t i = 0; i < HC_VK_MAX_BINDINGS; i++)
+    {
+      if (k->bindings[i] == pod_buffer->buffer) { pod_present = 1; break; }
+    }
+  }
+
+  if (pod_present == 1)
+  {
+    if (slot->pod_ready == 0)
+    {
+      if (hc_vkBufferAlloc (hashcat_ctx, k->device, k->phys, &slot->pod_buf, pod_buffer->size) != 0) return -1;
+
+      slot->pod_ready = 1;
+    }
+
+    memcpy (slot->pod_buf.host, pod_buffer->host, pod_buffer->size);
+
+    // this slot's set must now reference the snapshot instead of the shared buffer
+
+    slot->dset_valid = 0;
+  }
+
+  // rewrite this slot's descriptor set if its bindings changed (or the pod
+  // redirection above requires it). the set can only be referenced by this
+  // slot's own previous submission, whose fence we just waited on.
+
+  if ((k->dirty != 0) && (getenv ("HASHCAT_VK_DEBUG") != NULL) && (k->entrypoint != NULL) && (strstr (k->entrypoint, "aux2") != NULL))
   {
     fprintf (stderr, "[vkdbg] aux2 descriptors:");
     for (uint32_t i = 0; i < HC_VK_MAX_BINDINGS; i++)
@@ -1268,13 +1337,8 @@ int hc_vkDispatch (void *hashcat_ctx, VkQueue queue, vk_kernel k, uint64_t gx, u
     fprintf (stderr, "\n");
   }
 
-  if (k->dirty)
+  if (slot->dset_valid == 0)
   {
-    if (blocking == false)
-    {
-      if (vk_kernel_wait_slots (vk, k, hashcat_ctx) == -1) return -1;
-    }
-
     VkDescriptorBufferInfo binfo[HC_VK_MAX_BINDINGS];
     VkWriteDescriptorSet wr[HC_VK_MAX_BINDINGS];
 
@@ -1288,13 +1352,20 @@ int hc_vkDispatch (void *hashcat_ctx, VkQueue queue, vk_kernel k, uint64_t gx, u
 
       if (binding < 0 || binding >= HC_VK_MAX_BINDINGS) continue;
 
-      binfo[n].buffer = k->bindings[i];
+      VkBuffer buf = k->bindings[i];
+
+      if ((pod_present == 1) && (buf == pod_buffer->buffer))
+      {
+        buf = slot->pod_buf.buffer;
+      }
+
+      binfo[n].buffer = buf;
       binfo[n].offset = 0;
       binfo[n].range = VK_WHOLE_SIZE;
 
       wr[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
       wr[n].pNext = NULL;
-      wr[n].dstSet = k->dset;
+      wr[n].dstSet = slot->dset;
       wr[n].dstBinding = (uint32_t) binding;
       wr[n].dstArrayElement = 0;
       wr[n].descriptorCount = 1;
@@ -1308,12 +1379,10 @@ int hc_vkDispatch (void *hashcat_ctx, VkQueue queue, vk_kernel k, uint64_t gx, u
 
     vk->vkUpdateDescriptorSets (k->device, n, wr, 0, NULL);
 
-    k->dirty = 0;
+    slot->dset_valid = 1;
   }
 
   // record
-
-  hc_vk_slot_t *slot = &k->slots[k->slot_next];
 
   VkResult rc = vk->vkResetCommandBuffer (slot->cmdbuf, 0);
 
@@ -1348,12 +1417,12 @@ int hc_vkDispatch (void *hashcat_ctx, VkQueue queue, vk_kernel k, uint64_t gx, u
   }
 
   vk->vkCmdBindPipeline (slot->cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, k->pipeline);
-  vk->vkCmdBindDescriptorSets (slot->cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, k->layout, 0, 1, &k->dset, 0, NULL);
+  vk->vkCmdBindDescriptorSets (slot->cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, k->layout, 0, 1, &slot->dset, 0, NULL);
 
   // scalar arguments live in the push constant interface; copy their values
   // from the caller's staging buffer into the push constant block
 
-  if (pod_data != NULL)
+  if ((pod_buffer != NULL) && (pod_buffer->host != NULL))
   {
     for (uint32_t i = 0; i < HC_VK_MAX_BINDINGS; i++)
     {
@@ -1361,7 +1430,7 @@ int hc_vkDispatch (void *hashcat_ctx, VkQueue queue, vk_kernel k, uint64_t gx, u
 
       vk->vkCmdPushConstants (slot->cmdbuf, k->layout, VK_SHADER_STAGE_COMPUTE_BIT,
                               (uint32_t) k->pod_offset[i], (uint32_t) k->pod_size[i],
-                              (const char *) pod_data + k->pod_offset[i]);
+                              (const char *) pod_buffer->host + k->pod_offset[i]);
     }
   }
 

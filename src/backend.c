@@ -2915,7 +2915,7 @@ int run_vulkan_kernel_atinit (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *dev
   if (hc_vkSetKernelArg (hashcat_ctx, kernel, 0, buf) == -1) return -1;
   if (hc_vkSetKernelArg (hashcat_ctx, kernel, 1, &device_param->vk_d_kernel_param) == -1) return -1;
 
-  if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, kernel, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+  if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, kernel, num_elements, 1, &device_param->vk_d_kernel_param, NULL) == -1) return -1;
 
   return 0;
 }
@@ -2939,7 +2939,7 @@ int run_vulkan_kernel_utf8toutf16le (hashcat_ctx_t *hashcat_ctx, hc_device_param
   if (hc_vkSetKernelArg (hashcat_ctx, kernel, 0, buf) == -1) return -1;
   if (hc_vkSetKernelArg (hashcat_ctx, kernel, 1, &device_param->vk_d_kernel_param) == -1) return -1;
 
-  if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, kernel, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+  if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, kernel, num_elements, 1, &device_param->vk_d_kernel_param, NULL) == -1) return -1;
 
   return 0;
 }
@@ -3712,7 +3712,7 @@ int run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, con
 
     if (is_autotune == true)
     {
-      if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, global_x, global_y, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+      if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, global_x, global_y, &device_param->vk_d_kernel_param, NULL) == -1) return -1;
     }
 
     double exec_ms = 0;
@@ -3722,7 +3722,7 @@ int run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, con
     // a real measurement (blocked dispatch). neither case needs run_kernel to
     // know anything about them.
 
-    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, global_x, global_y, device_param->vk_d_kernel_param.host, &exec_ms) == -1) return -1;
+    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, global_x, global_y, &device_param->vk_d_kernel_param, &exec_ms) == -1) return -1;
 
     if (getenv ("HASHCAT_VK_DUMP") != NULL)
     {
@@ -4436,7 +4436,7 @@ int run_kernel_mp (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
       if (hc_vkKernelCompile (hashcat_ctx, vk_kern, device_param->vk_module_mp, device_param->vk_module_mp_refl, vk_kern->entrypoint, (uint32_t) kernel_threads, 1) == -1) return -1;
     }
 
-    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, &device_param->vk_d_kernel_param, NULL) == -1) return -1;
   }
 
   return 0;
@@ -4515,7 +4515,7 @@ int run_kernel_tm (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param)
       if (hc_vkKernelCompile (hashcat_ctx, vk_kern, device_param->vk_module, device_param->vk_module_refl, vk_kern->entrypoint, (uint32_t) kernel_threads_vk, 1) == -1) return -1;
     }
 
-    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, &device_param->vk_d_kernel_param, NULL) == -1) return -1;
   }
 
   return 0;
@@ -4654,7 +4654,7 @@ int run_kernel_amp (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param,
       if (hc_vkKernelCompile (hashcat_ctx, vk_kern, device_param->vk_module_amp, device_param->vk_module_amp_refl, vk_kern->entrypoint, (uint32_t) kernel_threads_vk, 1) == -1) return -1;
     }
 
-    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, &device_param->vk_d_kernel_param, NULL) == -1) return -1;
   }
 
   return 0;
@@ -4756,7 +4756,7 @@ int run_kernel_decompress (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device
       if (hc_vkKernelCompile (hashcat_ctx, vk_kern, device_param->vk_module_shared, device_param->vk_module_shared_refl, vk_kern->entrypoint, (uint32_t) kernel_threads_vk, 1) == -1) return -1;
     }
 
-    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, device_param->vk_d_kernel_param.host, NULL) == -1) return -1;
+    if (hc_vkDispatch (hashcat_ctx, device_param->vk_queue, vk_kern, num_elements, 1, &device_param->vk_d_kernel_param, NULL) == -1) return -1;
 
     if (getenv ("HASHCAT_VK_DEBUG_PWS"))
     {
