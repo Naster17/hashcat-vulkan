@@ -71,3 +71,7 @@ __pycache__/
 # Generated docs are overwritten anyway
 /docs/hashcat-example_hashes.md
 /docs/hashcat-help.md
+.opencode/
+amd-bc250-docs/
+dist/
+
