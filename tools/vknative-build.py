@@ -86,31 +86,29 @@ def gen_sha1_block():
 
 
 def gen_md5_block():
+    # Emitted as a runtime loop (not fully unrolled): the glslang/RADV toolchain
+    # miscompiles the 64-round fully-unrolled expansion (empty-block MD5 comes
+    # out wrong on the GPU, though the same source is correct in analysis). The
+    # loop form with table constants compiles correctly.
     S = [7,12,17,22]*4 + [5,9,14,20]*4 + [4,11,16,23]*4 + [6,10,15,21]*4
-    K = []
-    for i in range(64):
-        K.append("0x%08xu" % (int(abs(math.sin(i + 1)) * (1 << 32)) & 0xffffffff))
-    names = ["w0","w1","w2","w3","w4","w5","w6","w7","w8","w9","wa","wb","wc","wd","we","wf"]
+    K = [int(abs(math.sin(i + 1)) * (1 << 32)) & 0xffffffff for i in range(64)]
     L = []
+    L.append("const uint MD5_S[64] = uint[](%s);" % ", ".join("%du" % v for v in S))
+    L.append("const uint MD5_K[64] = uint[](%s);" % ", ".join("0x%08xu" % v for v in K))
     L.append("void md5_block (inout uint st0, inout uint st1, inout uint st2, inout uint st3, const uint wi[16])")
     L.append("{")
     L.append("  uint a = st0, b = st1, c = st2, d = st3;")
-    L.append("  uint w0  = wi[ 0]; uint w1  = wi[ 1]; uint w2  = wi[ 2]; uint w3  = wi[ 3];")
-    L.append("  uint w4  = wi[ 4]; uint w5  = wi[ 5]; uint w6  = wi[ 6]; uint w7  = wi[ 7];")
-    L.append("  uint w8  = wi[ 8]; uint w9  = wi[ 9]; uint wa  = wi[10]; uint wb  = wi[11];")
-    L.append("  uint wc  = wi[12]; uint wd  = wi[13]; uint we  = wi[14]; uint wf  = wi[15];")
-    for i in range(64):
-        if i < 16:  gi = i
-        elif i < 32: gi = (5 * i + 1) % 16
-        elif i < 48: gi = (3 * i + 5) % 16
-        else:        gi = (7 * i) % 16
-        if i < 16:  f = "(d ^ (b & (c ^ d)))"
-        elif i < 32: f = "(c ^ (d & (b ^ c)))"
-        elif i < 48: f = "(b ^ c ^ d)"
-        else:        f = "(c ^ (b | ~d))"
-        L.append("  { uint tmp = d; d = c; c = b;")
-        L.append(f"    b = b + ROTL (a + ({f}) + {K[i]} + {names[gi]}, {S[i]});")
-        L.append("    a = tmp; }")
+    L.append("  for (int i = 0; i < 64; i++)")
+    L.append("  {")
+    L.append("    uint f; int gi;")
+    L.append("    if (i < 16)      { f = d ^ (b & (c ^ d)); gi = i; }")
+    L.append("    else if (i < 32) { f = c ^ (d & (b ^ c)); gi = (5 * i + 1) % 16; }")
+    L.append("    else if (i < 48) { f = b ^ c ^ d;         gi = (3 * i + 5) % 16; }")
+    L.append("    else             { f = c ^ (b | ~d);      gi = (7 * i) % 16; }")
+    L.append("    uint tmp = d; d = c; c = b;")
+    L.append("    b = b + ROTL (a + f + MD5_K[i] + wi[gi], MD5_S[i]);")
+    L.append("    a = tmp;")
+    L.append("  }")
     L.append("  st0 += a; st1 += b; st2 += c; st3 += d;")
     L.append("}")
     return "\n".join(L)
@@ -129,22 +127,31 @@ SHA256_K = [
 
 
 def gen_sha256_block():
+    # textbook SHA-256. GF(2) rotations are written with the SHA-256 ROTR
+    # amounts converted to ROTL (ROTR n == ROTL 32-n).
+    # NOTE: kept as a fully expanded schedule. A rotating 16-word window was
+    # tried for lower register pressure, but the self-referential ring pattern
+    # is miscompiled by the glslang/RADV toolchain (WPA3/keyver3 breaks), the
+    # same class of issue documented in gen_md5_block(). sha256_block is only
+    # used by the WPA3 aux kernel (once per candidate), not the hot PBKDF2
+    # loop, so the expansion cost here is negligible.
     sched = [f"wi[{i}]" for i in range(16)]
     L = []
     L.append("void sha256_block (inout uint st0, inout uint st1, inout uint st2, inout uint st3, inout uint st4, inout uint st5, inout uint st6, inout uint st7, const uint wi[16])")
     L.append("{")
     L.append("  uint a = st0, b = st1, c = st2, d = st3, e = st4, f = st5, g = st6, h = st7;")
     for i in range(16, 64):
-        s0 = sched[i - 15]; s1 = sched[i - 2]; s2 = sched[i - 7]; s3 = sched[i - 16]
-        L.append(f"  uint w{i} = (ROTL ({s3}, 25) ^ ROTL ({s3}, 14) ^ ({s3} >> 3))")
-        L.append(f"               + (ROTL ({s0}, 15) ^ ROTL ({s0}, 13) ^ ({s0} >> 10))")
-        L.append(f"               + (ROTL ({s2}, 15) ^ ROTL ({s2}, 13) ^ ({s2} >> 10))")
-        L.append(f"               + (ROTL ({s1}, 25) ^ ROTL ({s1}, 14) ^ ({s1} >> 3));")
+        w15 = sched[i - 15]; w2 = sched[i - 2]; w7 = sched[i - 7]; w16 = sched[i - 16]
+        # sigma0(x) = ROTR 7 ^ ROTR 18 ^ >> 3   (= ROTL 25 ^ ROTL 14 ^ >> 3)
+        # sigma1(x) = ROTR 17 ^ ROTR 19 ^ >> 10 (= ROTL 15 ^ ROTL 13 ^ >> 10)
+        L.append(f"  uint w{i} = {w16} + (ROTL ({w15}, 25) ^ ROTL ({w15}, 14) ^ ({w15} >> 3)) + {w7} + (ROTL ({w2}, 15) ^ ROTL ({w2}, 13) ^ ({w2} >> 10));")
         sched.append(f"w{i}")
     for i in range(64):
-        t1 = (f"h + (ROTL (e, 6) ^ ROTL (e, 11) ^ ROTL (e, 25))"
+        # Sigma1(e) = ROTR 6  ^ ROTR 11 ^ ROTR 25 (= ROTL 26 ^ ROTL 21 ^ ROTL 7)
+        # Sigma0(a) = ROTR 2  ^ ROTR 13 ^ ROTR 22 (= ROTL 30 ^ ROTL 19 ^ ROTL 10)
+        t1 = (f"h + (ROTL (e, 26) ^ ROTL (e, 21) ^ ROTL (e, 7))"
               f" + ((e & f) ^ (~e & g)) + {SHA256_K[i]:#010x}u + {sched[i]}")
-        t2 = f"(ROTL (a, 2) ^ ROTL (a, 13) ^ ROTL (a, 22)) + ((a & b) ^ (a & c) ^ (b & c))"
+        t2 = f"(ROTL (a, 30) ^ ROTL (a, 19) ^ ROTL (a, 10)) + ((a & b) ^ (a & c) ^ (b & c))"
         L.append(f"  {{ uint tt1 = {t1}; uint tt2 = {t2}; h = g; g = f; f = e; e = d + tt1; d = c; c = b; b = a; a = tt1 + tt2; }}")
     L.append("  st0 += a; st1 += b; st2 += c; st3 += d; st4 += e; st5 += f; st6 += g; st7 += h;")
     L.append("}")
@@ -285,7 +292,10 @@ def gen_streaming(name, nstate, iv_expr, block_fn, le):
     L.append("  }")
     L.append("  else")
     L.append("  {")
-    L.append("    tail[nw] = 0x80000000u;")
+    if le:
+        L.append("    tail[nw] = 0x00000080u;")
+    else:
+        L.append("    tail[nw] = 0x80000000u;")
     L.append("  }")
     L.append("")
     L.append("  uint total = prefix_len + uint(len_bytes);")
@@ -381,7 +391,13 @@ def gen_hmac_core(name, nstate, digest_words, bitlen_base):
     L.append("")
     for i in range(nstate):
         L.append("  inner[%d] = ist[%d];" % (i, i))
-    L.append("  inner[%d] = 0x80000000u;" % nstate)
+    # 0x80 padding for the outer-HMAC block sits right after the inner digest
+    # (byte offset nstate*4). BE hashes store it in the high byte of that word;
+    # little-endian MD5 stores it in the low byte.
+    if name.startswith("md5"):
+        L.append("  inner[%d] = 0x00000080u;" % nstate)
+    else:
+        L.append("  inner[%d] = 0x80000000u;" % nstate)
     L.append("")
     L.append("  for (int i = %d; i < 14; i++) inner[i] = 0;" % (nstate + 1))
     L.append("")

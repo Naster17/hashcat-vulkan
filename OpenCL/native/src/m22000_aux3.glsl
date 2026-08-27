@@ -142,11 +142,11 @@ void main()
       sha256_hmac_core (istate, ostate, msg, 102,
                         kck0, kck1, kck2, kck3, kck4, kck5, kck6, kck7);
 
-      // note: the clspv kernel swaps only the first four words here because
-      // aes128_set_encrypt_key() swaps them back internally
-
-      kck0 = bswap32 (kck0); kck1 = bswap32 (kck1);
-      kck2 = bswap32 (kck2); kck3 = bswap32 (kck3);
+      // note: hashcat's C aes128_set_encrypt_key() internally byte-swaps its
+      // input before expanding, so the OpenCL kernel pre-swaps the KCK. This
+      // GLSL aes128_expand_key does NOT swap, so it must receive the RAW
+      // (unswapped) SHA-256 state words, or the AES key schedule would be
+      // built on byte-reversed key material.
 
       // aes-128 cmac over eapol
 

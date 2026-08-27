@@ -76,61 +76,19 @@ void main()
 
   sha1_hmac_core (istate, ostate, pdata, 20, r0, r1, r2, r3, r4);
 
-  // COMPARE_M equivalent
+  // direct per-salt compare (mirrors OpenCL/m22000-pure.cl non-static path): the
+  // computed HMAC state is byte-swapped before comparing against wpa->pmkid[].
+  // This is what aux1..aux3 do; the bespoke bitmap/binary-search over digests_buf
+  // that used to be here was order-sensitive and dropped valid salts.
 
-  uint digest_tp[4];
-
-  digest_tp[0] = r0;
-  digest_tp[1] = r1;
-  digest_tp[2] = r2;
-  digest_tp[3] = r3;
-
-  if (!CHECK_BM (raw7,  KP_MASK, KP_SHIFT1, digest_tp[0])) return;
-  if (!CHECK_BM (raw8,  KP_MASK, KP_SHIFT1, digest_tp[1])) return;
-  if (!CHECK_BM (raw9,  KP_MASK, KP_SHIFT1, digest_tp[2])) return;
-  if (!CHECK_BM (raw10, KP_MASK, KP_SHIFT1, digest_tp[3])) return;
-
-  if (!CHECK_BM (raw11, KP_MASK, KP_SHIFT2, digest_tp[0])) return;
-  if (!CHECK_BM (raw12, KP_MASK, KP_SHIFT2, digest_tp[1])) return;
-  if (!CHECK_BM (raw13, KP_MASK, KP_SHIFT2, digest_tp[2])) return;
-  if (!CHECK_BM (raw14, KP_MASK, KP_SHIFT2, digest_tp[3])) return;
-
-  // find_hash(): binary search over digests_buf[digests_offset ..]
-
-  const uint digests_cnt = KP_DGST_CNT;
-  const uint dgst_off    = KP_DGST_OFF * 4u;
-
-  int found = -1;
-
-  for (uint l = 0u, r = digests_cnt; r != 0u; r >>= 1u)
+  if ((bswap32 (r0) == wpa_get (wpa_base, WPA_PMKID + 0u))
+   && (bswap32 (r1) == wpa_get (wpa_base, WPA_PMKID + 1u))
+   && (bswap32 (r2) == wpa_get (wpa_base, WPA_PMKID + 2u))
+   && (bswap32 (r3) == wpa_get (wpa_base, WPA_PMKID + 3u)))
   {
-    const uint mm = r >> 1u;
-    const uint c = l + mm;
-
-    const int cmp = hash_comp (digest_tp, (dgst_off + c) * 4u);
-
-    if (cmp > 0)
+    if (claim_hash (digest_cur))
     {
-      l += mm + 1u;
-
-      r--;
-    }
-
-    if (cmp == 0)
-    {
-      found = int(c);
-
-      break;
-    }
-  }
-
-  if (found != -1)
-  {
-    const uint final_hash_pos = KP_DGST_OFF + uint(found);
-
-    if (claim_hash (final_hash_pos))
-    {
-      mark_hash_vk (gid, digest_pos, final_hash_pos);
+      mark_hash_vk (gid, digest_pos, digest_cur);
     }
   }
 }
