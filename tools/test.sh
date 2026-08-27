@@ -29,13 +29,96 @@ LUKS1_ALL_MODES="${LUKS1_LEGACY_MODE} ${LUKS1_MODES}"
 # List of LUKS2 modes which have test containers
 LUKS2_MODES="34100"
 
+# GPG secret-key modes generated on-the-fly with -g:
+#   17010/17020/17030/17040 - gpg1 (GnuPG 1.4) controls the classic S2K
+#     digest/cipher; gpg2 also produces the default SHA1/AES key.
+#   17050 (AES-OCB) - GnuPG 2.3+ protects the on-disk private key with
+#     openpgp-s2k3-ocb-aes (12-byte OCB nonce). Both an ed25519 and an rsa2048
+#     key are generated with gpg2 (the kernel verifies both ECC and RSA, whose
+#     decrypted secret starts "(((1:d32:" resp. "(((1:d256:") and the hash is read
+#     straight from private-keys-v1.d/*.key by tools/gpg-ocb-aes2hashcat.py
+#     (gpg2john and --export-secret-keys cannot: they re-encode to the wire
+#     format with a 16-byte nonce / CFB).
+GPG_GEN_MODES="17010 17020 17030 17040 17050"
+
+# PKZIP (traditional PKWARE / ZipCrypto) modes generated on-the-fly with -g
+PKZIP_GEN_MODES="17200 17210 17220 17225 17230"
+
+# RAR modes generated on-the-fly with -g:
+#   12500 RAR3-hp (header-encrypted), 23700 RAR3-p (store), 23800 RAR3-p
+#   (compressed), 13000 RAR5. RAR3 creation needs a rar CLI that still supports
+#   the -ma4 switch (rar <= 6.x); rar 7.x can only make RAR5. rar_test() prefers
+#   an -ma4-capable rar and otherwise limits itself to RAR5.
+RAR_GEN_MODES="12500 13000 23700 23800"
+
+
+# Modes with no test.pl oracle whose ground truth is the module's own self-test
+# vector, read out of hashcat with --hash-info. Every module ships an ST_HASH
+# and ST_PASS pair, a real hash of a real password, so a mode that cannot have
+# a .pm still gets a genuine end to end crack in every run with nothing checked
+# in. See selftest_vector_test(), and -S to run this over every mode.
+#
+# 23800 (RAR3-p, compressed) is the case that needs it: an oracle would have to
+# reproduce RAR's compressor, since module_23800 includes the unRAR engine and
+# calls hc_decompress_rar(). Before this it could only be reached with -g.
+SELFTEST_MODES="23800"
+
+# 7-Zip and WinZip AES modes generated on-the-fly with -g. Both come out of the
+# same 7z binary, which nearly every machine already has, so one function covers
+# them: 11600 from a .7z, 13600 from a zip whose entries use WinZip AES.
+SEVENZIP_GEN_MODES="11600 13600"
+
+# PDF modes generated on-the-fly with -g, using qpdf. 10400 is what its 40-bit
+# option produces (V1/R2), 10500 covers both its RC4-128 and its AES-128 output,
+# and 10700 its AES-256. 10600 is not here: it is Adobe's R5 extension, which
+# qpdf does not write, and neither is 10510, which wants V1-2 with R3.
+PDF_GEN_MODES="10400 10500 10700"
+
+# OpenSSH private-key mode generated on-the-fly with -g. ssh-keygen -m PEM
+# writes the classic DEK-Info form with AES-128-CBC, which is $sshng$1$ and so
+# 22931. The other ciphers in the family have no generator here: modern
+# ssh-keygen only writes openssh-key-v1, which no 229xx mode parses, and
+# openssl 3 writes PKCS#8 instead of a DEK-Info header.
+SSH_GEN_MODES="22931"
+
+# Every mode -g can build a container for, which is the whole of what -g means.
+# On its own -g runs exactly these, and -g together with a -m that selects none
+# of them is an error rather than a run that walks the list and generates
+# nothing. Each generator adds its modes here.
+GEN_MODES="${GPG_GEN_MODES} ${PKZIP_GEN_MODES} ${RAR_GEN_MODES} ${SEVENZIP_GEN_MODES} ${PDF_GEN_MODES} ${SSH_GEN_MODES} ${LUKS1_MODES} ${LUKS2_MODES} ${TC_MODES} ${VC_MODES}"
+
+# Of those, the ones whose generator needs root. Everything else builds its
+# container entirely in userspace, so a run that selects none of these never
+# asks for a password.
+#
+# LUKS is here because the payload has to be a real filesystem and that means
+# device-mapper, TrueCrypt because tcplay insists on a block device. GPG, PKZIP,
+# RAR, 7-Zip, WinZip AES, PDF, OpenSSH and VeraCrypt all generate as the user.
+GEN_SUDO_MODES="${LUKS1_MODES} ${LUKS2_MODES} ${TC_MODES}"
+
 LUKS_MODES="${LUKS1_MODES} ${LUKS2_MODES}"
+
+# The container tests read their volumes from these directories. With -g they
+# are pointed at a directory test.sh fills itself, so the same tests run against
+# freshly built containers instead of the ones shipped in the tree or fetched
+# from hashcat.net.
+TC_TESTS_DIR="${TDIR}/tc_tests"
+VC_TESTS_DIR="${TDIR}/vc_tests"
+LUKS_TESTS_DIR="${TDIR}/luks_tests"
+
+# The password every generated container is built with, and the one the shipped
+# containers already use.
+CONTAINER_PASSWORD="hashcat"
 
 # Cryptoloop mode which have test containers
 CL_MODES="14511 14512 14513 14521 14522 14523 14531 14532 14533 14541 14542 14543 14551 14552 14553"
 
-HASH_TYPES=$(ls "${TDIR}"/test_modules/*.pm | sed -E 's/.*m0*([0-9]+).pm/\1/')
-HASH_TYPES="${HASH_TYPES} ${TC_MODES} ${VC_MODES} ${LUKS1_ALL_MODES} ${LUKS2_MODES} ${CL_MODES}"
+# PM_MODES is the set of modes that have a test.pl oracle, kept separately from
+# HASH_TYPES because -g now runs a real-container test in addition to the oracle
+# instead of in place of it, so the dispatch has to know which modes still have
+# an oracle left to run.
+PM_MODES=$(ls "${TDIR}"/test_modules/*.pm | sed -E 's/.*m0*([0-9]+).pm/\1/' | tr '\n' ' ')
+HASH_TYPES="${PM_MODES} ${TC_MODES} ${VC_MODES} ${LUKS1_ALL_MODES} ${LUKS2_MODES} ${CL_MODES} ${SELFTEST_MODES}"
 HASH_TYPES=$(echo -n "${HASH_TYPES}" | tr ' ' '\n' | sort -u -n | tr '\n' ' ')
 
 # Two widths, because -V all multiplies the whole run by however many are listed and five of them
@@ -222,7 +305,7 @@ function init()
 
   #LUKS1
   if is_in_array "$hash_type" ${LUKS1_ALL_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 0 ]] ; then
-    luks_tests_folder="${TDIR}/luks_tests/"
+    luks_tests_folder="${LUKS_TESTS_DIR}/"
 
     if [ ! -d "${luks_tests_folder}" ]; then
       mkdir -p "${luks_tests_folder}"
@@ -671,7 +754,7 @@ function attack_0()
 
         temp_file="${OUTD}/${hash_type}_filebased_only_temp.txt"
 
-        if [ "${hash_type}" -ne 22000 ]; then
+        if [ "${hash_type}" -ne 22000 ] && [ "${hash_type}" -ne 22001 ]; then
           echo "${hash}" | base64 -d > "${temp_file}"
         else
           echo "${hash}" > "${temp_file}"
@@ -801,7 +884,7 @@ function attack_0()
 
       while read -r file_only_hash; do
 
-        if [ "${hash_type}" -ne 22000 ]; then
+        if [ "${hash_type}" -ne 22000 ] && [ "${hash_type}" -ne 22001 ]; then
           echo -n "${file_only_hash}" | base64 -d >> "${temp_file}"
         else
           echo "${file_only_hash}" >> "${temp_file}"
@@ -946,7 +1029,7 @@ function attack_1()
 
           temp_file="${OUTD}/${hash_type}_filebased_only_temp.txt"
 
-          if [ "${hash_type}" -ne 22000 ]; then
+          if [ "${hash_type}" -ne 22000 ] && [ "${hash_type}" -ne 22001 ]; then
             echo "${hash}" | base64 -d > "${temp_file}"
           else
             echo "${hash}" > "${temp_file}"
@@ -1127,7 +1210,7 @@ function attack_1()
 
       while read -r file_only_hash; do
 
-        if [ "${hash_type}" -ne 22000 ]; then
+        if [ "${hash_type}" -ne 22000 ] && [ "${hash_type}" -ne 22001 ]; then
           echo -n "${file_only_hash}" | base64 -d >> "${temp_file}"
         else
           echo "${file_only_hash}" >> "${temp_file}"
@@ -1259,7 +1342,7 @@ function attack_3()
 
         temp_file="${OUTD}/${hash_type}_filebased_only_temp.txt"
 
-        if [ "${hash_type}" -ne 22000 ]; then
+        if [ "${hash_type}" -ne 22000 ] && [ "${hash_type}" -ne 22001 ]; then
           echo "${hash}" | base64 -d > "${temp_file}"
         else
           echo "${hash}" > "${temp_file}"
@@ -1442,7 +1525,7 @@ function attack_3()
 
       while read -r file_only_hash; do
 
-        if [ "${hash_type}" -ne 22000 ]; then
+        if [ "${hash_type}" -ne 22000 ] && [ "${hash_type}" -ne 22001 ]; then
           echo -n "${file_only_hash}" | base64 -d >> "${temp_file}"
         else
           echo "${file_only_hash}" >> "${temp_file}"
@@ -1902,7 +1985,7 @@ function attack_6()
 
           temp_file="${OUTD}/${hash_type}_filebased_only_temp.txt"
 
-          if [ "${hash_type}" -ne 22000 ]; then
+          if [ "${hash_type}" -ne 22000 ] && [ "${hash_type}" -ne 22001 ]; then
             echo "${hash}" | base64 -d > "${temp_file}"
           else
             echo "${hash}" > "${temp_file}"
@@ -2117,7 +2200,7 @@ function attack_6()
 
         while read -r file_only_hash; do
 
-          if [ "${hash_type}" -ne 22000 ]; then
+          if [ "${hash_type}" -ne 22000 ] && [ "${hash_type}" -ne 22001 ]; then
             echo -n "${file_only_hash}" | base64 -d >> "${temp_file}"
           else
             echo "${file_only_hash}" >> "${temp_file}"
@@ -2283,7 +2366,7 @@ function attack_7()
 
           temp_file="${OUTD}/${hash_type}_filebased_only_temp.txt"
 
-          if [ "${hash_type}" -ne 22000 ]; then
+          if [ "${hash_type}" -ne 22000 ] && [ "${hash_type}" -ne 22001 ]; then
             echo "${hash}" | base64 -d > "${temp_file}"
           else
             echo "${hash}" > "${temp_file}"
@@ -2562,7 +2645,7 @@ function attack_7()
 
         while read -r file_only_hash; do
 
-          if [ "${hash_type}" -ne 22000 ]; then
+          if [ "${hash_type}" -ne 22000 ] && [ "${hash_type}" -ne 22001 ]; then
             echo -n "${file_only_hash}" | base64 -d >> "${temp_file}"
           else
             echo "${file_only_hash}" >> "${temp_file}"
@@ -2728,7 +2811,7 @@ function attack_12()
 
           temp_file="${OUTD}/${hash_type}_filebased_only_temp.txt"
 
-          if [ "${hash_type}" -ne 22000 ]; then
+          if [ "${hash_type}" -ne 22000 ] && [ "${hash_type}" -ne 22001 ]; then
             echo "${hash}" | base64 -d > "${temp_file}"
           else
             echo "${hash}" > "${temp_file}"
@@ -2989,7 +3072,7 @@ function attack_12()
 
         while read -r file_only_hash; do
 
-          if [ "${hash_type}" -ne 22000 ]; then
+          if [ "${hash_type}" -ne 22000 ] && [ "${hash_type}" -ne 22001 ]; then
             echo -n "${file_only_hash}" | base64 -d >> "${temp_file}"
           else
             echo "${file_only_hash}" >> "${temp_file}"
@@ -3268,6 +3351,358 @@ function cryptoloop_test()
   fi
 }
 
+# Real-container generation for TrueCrypt, VeraCrypt and LUKS1, the -g
+# counterpart of what gpg_test, pkzip_test and rar_test do for their formats.
+# Each one builds the volume with the tool that owns the format, and the
+# existing truecrypt_test, veracrypt_test and luks_test then run against it
+# unchanged, because -g only points TC_TESTS_DIR, VC_TESTS_DIR and
+# LUKS_TESTS_DIR at the directory these functions fill.
+#
+# What each needs:
+#
+#   VeraCrypt : the veracrypt console build. No privileges, it writes the whole
+#               volume itself. 1.26 dropped RIPEMD-160 for new volumes, so
+#               VERACRYPT_BIN pointed at a 1.25.9 or older build is what covers
+#               the RIPEMD-160 modes; a newer one skips them and says so.
+#               No version can write a TrueCrypt volume: -tc/--truecrypt is a
+#               mount-time compatibility flag, never a creation mode.
+#   TrueCrypt : tcplay, plus a loop device and a pty, so sudo and expect. The
+#               format has no free creator left; tcplay is the only one.
+#   LUKS1     : cryptsetup, plus sudo. Writing the header needs no privileges,
+#               but hashcat verifies a LUKS candidate by decrypting the payload
+#               and recognizing a filesystem, so the volume has to be opened and
+#               formatted, and that is device-mapper.
+#
+# Installing what is not packaged:
+#
+#   sudo apt install tcplay expect cryptsetup
+#
+#   # veracrypt is not in any distribution; the console build is a .deb
+#   curl -LO https://launchpad.net/veracrypt/trunk/1.26.24/+download/veracrypt-console-1.26.24-Ubuntu-24.04-amd64.deb
+#   sudo apt install ./veracrypt-console-1.26.24-Ubuntu-24.04-amd64.deb
+#
+#   # 1.26 refuses to create RIPEMD-160 volumes, so the RIPEMD-160 modes need an
+#   # older build. Unpack it beside the current one rather than replacing it,
+#   # and point VERACRYPT_BIN at it only for those runs:
+#   curl -LO https://launchpad.net/veracrypt/trunk/1.25.9/+download/veracrypt-console-1.25.9-Ubuntu-20.04-amd64.deb
+#   dpkg-deb -x veracrypt-console-1.25.9-Ubuntu-20.04-amd64.deb "${HOME}/veracrypt-1.25.9"
+#   VERACRYPT_BIN="${HOME}/veracrypt-1.25.9/usr/bin/veracrypt" ./tools/test.sh -m 13711 -g
+#
+# VERACRYPT_BIN, TCPLAY_BIN and CRYPTSETUP_BIN override the binaries if they
+# live somewhere else.
+
+function container_gen_dir()
+{
+  # Generated volumes go under the run's own output directory, so they never
+  # land next to, or on top of, the ones committed to the tree.
+  local cg_dir="${OUTD}/${1}"
+
+  mkdir -p "${cg_dir}"
+
+  echo "${cg_dir}"
+}
+
+function vc_encryption_name()
+{
+  # test.sh spells a cascade "aes-twofish-serpent"; veracrypt spells the same
+  # thing "AES(Twofish(Serpent))".
+  local ve_cascade="$1"
+  local ve_out=""
+  local ve_close=""
+  local ve_part
+
+  local IFS='-'
+
+  for ve_part in ${ve_cascade}; do
+    case "${ve_part}" in
+      aes)        ve_part="AES" ;;
+      serpent)    ve_part="Serpent" ;;
+      twofish)    ve_part="Twofish" ;;
+      camellia)   ve_part="Camellia" ;;
+      kuznyechik) ve_part="Kuznyechik" ;;
+      *)          return 1 ;;
+    esac
+
+    if [ -z "${ve_out}" ]; then
+      ve_out="${ve_part}"
+    else
+      ve_out="${ve_out}(${ve_part}"
+      ve_close="${ve_close})"
+    fi
+  done
+
+  echo "${ve_out}${ve_close}"
+}
+
+function veracrypt_generate()
+{
+  # $1 = hash, $2 = cipher cascade, $3 = target file
+  local vg_hash="$1"
+  local vg_cascade="$2"
+  local vg_file="$3"
+
+  local VERACRYPT_BIN="${VERACRYPT_BIN:-veracrypt}"
+
+  if ! command -v "${VERACRYPT_BIN}" >/dev/null 2>&1; then
+    record_skip "${hash_type}" "veracrypt not found, so no VeraCrypt volume can be generated (set VERACRYPT_BIN=/path/to/veracrypt)"
+    return 1
+  fi
+
+  local vg_encryption
+
+  vg_encryption="$(vc_encryption_name "${vg_cascade}")"
+
+  if [ -z "${vg_encryption}" ]; then
+    record_skip "${hash_type}" "no veracrypt name for cipher cascade ${vg_cascade}"
+    return 1
+  fi
+
+  rm -f "${vg_file}"
+
+  # 1 MiB is over VeraCrypt's minimum and keeps generation to a moment; hashcat
+  # only ever reads the header.
+  "${VERACRYPT_BIN}" --text --create "${vg_file}" \
+    --size=1M \
+    --password="${CONTAINER_PASSWORD}" \
+    --volume-type=normal \
+    --encryption="${vg_encryption}" \
+    --hash="${vg_hash}" \
+    --filesystem=none \
+    --pim=0 \
+    --keyfiles= \
+    --random-source=/dev/urandom \
+    --non-interactive >/dev/null 2>&1
+
+  if [ ! -s "${vg_file}" ]; then
+    rm -f "${vg_file}"
+
+    if [ "${vg_hash}" = "ripemd160" ]; then
+      # Whether this works depends on the binary rather than on the combination:
+      # VeraCrypt 1.26 dropped RIPEMD-160 for new volumes, 1.25.9 still writes
+      # them, so the message names the way out rather than calling it unsupported.
+      record_skip "${hash_type}" "${VERACRYPT_BIN} will not create RIPEMD-160 volumes; 1.26 dropped them, so point VERACRYPT_BIN at a 1.25.9 or older build to cover these"
+    else
+      record_skip "${hash_type}" "veracrypt refused ${vg_hash} + ${vg_encryption}, which is not a combination it supports"
+    fi
+
+    return 1
+  fi
+
+  return 0
+}
+
+function truecrypt_container_name()
+{
+  # The container each (mode, tcMode) pair wants, as <prf>_<cascade> with _boot
+  # appended for the system-encryption variants. The case statement inside
+  # truecrypt_test() spells the same thing out file by file; this is the same
+  # mapping in the form generation needs, one step ahead of it.
+  # $1 = hashType, $2 = tcMode
+  local tn_type="$1"
+  local tn_mode="$2"
+
+  local tn_group="${tn_type: -2:1}"   # 1 ripemd160, 2 sha512, 3 whirlpool, 4 ripemd160 boot
+  local tn_count="${tn_type: -1:1}"   # ciphers in the cascade
+
+  local tn_prf
+  local tn_boot=""
+
+  case "${tn_group}" in
+    1) tn_prf="ripemd160" ;;
+    2) tn_prf="sha512" ;;
+    3) tn_prf="whirlpool" ;;
+    4) tn_prf="ripemd160"; tn_boot="_boot" ;;
+    *) return 1 ;;
+  esac
+
+  local tn_cascade
+
+  case "${tn_count}${tn_mode}" in
+    10) tn_cascade="aes" ;;
+    11) tn_cascade="serpent" ;;
+    12) tn_cascade="twofish" ;;
+    20) tn_cascade="aes-twofish" ;;
+    21) tn_cascade="serpent-aes" ;;
+    22) tn_cascade="twofish-serpent" ;;
+    30) tn_cascade="aes-twofish-serpent" ;;
+    31) tn_cascade="serpent-twofish-aes" ;;
+    *) return 1 ;;
+  esac
+
+  echo "${tn_prf}_${tn_cascade}${tn_boot}"
+}
+
+function truecrypt_generate()
+{
+  # $1 = prf, $2 = cipher cascade, $3 = target file
+  local tg_prf="$1"
+  local tg_cascade="$2"
+  local tg_file="$3"
+
+  local TCPLAY_BIN="${TCPLAY_BIN:-tcplay}"
+
+  if ! command -v "${TCPLAY_BIN}" >/dev/null 2>&1; then
+    record_skip "${hash_type}" "tcplay not found, so no TrueCrypt volume can be generated (apt install tcplay, or set TCPLAY_BIN=...)"
+    return 1
+  fi
+
+  if ! command -v expect >/dev/null 2>&1; then
+    record_skip "${hash_type}" "expect not found, and tcplay reads its passphrase from a terminal (apt install expect)"
+    return 1
+  fi
+
+  local tg_prf_name
+
+  case "${tg_prf}" in
+    ripemd160) tg_prf_name="RIPEMD160" ;;
+    sha512)    tg_prf_name="SHA512" ;;
+    whirlpool) tg_prf_name="whirlpool" ;;
+    *)
+      record_skip "${hash_type}" "tcplay has no PBKDF PRF for ${tg_prf}"
+      return 1
+      ;;
+  esac
+
+  # tcplay names a cascade innermost first, TrueCrypt names it outermost first,
+  # so these are the same chains read from opposite ends.
+  local tg_cipher
+
+  case "${tg_cascade}" in
+    aes)                 tg_cipher="AES-256-XTS" ;;
+    serpent)             tg_cipher="SERPENT-256-XTS" ;;
+    twofish)             tg_cipher="TWOFISH-256-XTS" ;;
+    aes-twofish)         tg_cipher="TWOFISH-256-XTS,AES-256-XTS" ;;
+    serpent-aes)         tg_cipher="AES-256-XTS,SERPENT-256-XTS" ;;
+    twofish-serpent)     tg_cipher="SERPENT-256-XTS,TWOFISH-256-XTS" ;;
+    aes-twofish-serpent) tg_cipher="SERPENT-256-XTS,TWOFISH-256-XTS,AES-256-XTS" ;;
+    serpent-twofish-aes) tg_cipher="AES-256-XTS,TWOFISH-256-XTS,SERPENT-256-XTS" ;;
+    *)
+      record_skip "${hash_type}" "tcplay has no cipher chain for ${tg_cascade}"
+      return 1
+      ;;
+  esac
+
+  local tg_expect="${OUTD}/tcplay_create.exp"
+
+  cat > "${tg_expect}" << 'EXPECT_EOF'
+set timeout 600
+set dev  [lindex $argv 0]
+set pass [lindex $argv 1]
+set prf  [lindex $argv 2]
+set ciph [lindex $argv 3]
+set bin  [lindex $argv 4]
+spawn $bin --create --device=$dev --cipher=$ciph --pbkdf-prf=$prf --insecure-erase --weak-keys
+expect "Passphrase:"        { send "$pass\r" }
+expect "Repeat passphrase:" { send "$pass\r" }
+expect "(y/n)"              { send "y\r" }
+expect eof
+catch wait result
+exit [lindex $result 3]
+EXPECT_EOF
+
+  rm -f "${tg_file}"
+
+  # tcplay writes only the header, which is all hashcat reads, but it insists on
+  # a block device
+  truncate -s 2M "${tg_file}" 2>/dev/null
+
+  local tg_loop
+
+  tg_loop=$(sudo losetup --show -f "${tg_file}" 2>/dev/null)
+
+  if [ -z "${tg_loop}" ]; then
+    rm -f "${tg_file}"
+
+    record_skip "${hash_type}" "could not attach a loop device, which tcplay needs (sudo losetup)"
+    return 1
+  fi
+
+  sudo expect "${tg_expect}" "${tg_loop}" "${CONTAINER_PASSWORD}" "${tg_prf_name}" "${tg_cipher}" "${TCPLAY_BIN}" >/dev/null 2>&1
+
+  local tg_rc=$?
+
+  sudo losetup -d "${tg_loop}" 2>/dev/null
+
+  if [ "${tg_rc}" -ne 0 ] || [ ! -s "${tg_file}" ]; then
+    rm -f "${tg_file}"
+
+    record_skip "${hash_type}" "tcplay could not create a ${tg_prf} + ${tg_cascade} volume"
+    return 1
+  fi
+
+  return 0
+}
+
+function luks1_generate()
+{
+  # $1 = hash, $2 = cipher, $3 = chain mode, $4 = key size, $5 = target file
+  local lg_hash="$1"
+  local lg_cipher="$2"
+  local lg_mode="$3"
+  local lg_keysize="$4"
+  local lg_file="$5"
+
+  local CRYPTSETUP_BIN="${CRYPTSETUP_BIN:-cryptsetup}"
+
+  if ! command -v "${CRYPTSETUP_BIN}" >/dev/null 2>&1; then
+    record_skip "${hash_type}" "cryptsetup not found, so no LUKS1 container can be generated"
+    return 1
+  fi
+
+  # cbc-essiv is written cbc-essiv:sha256 in a cryptsetup cipher spec
+  local lg_chain="${lg_mode}"
+
+  if [ "${lg_mode}" = "cbc-essiv" ]; then
+    lg_chain="cbc-essiv:sha256"
+  fi
+
+  local lg_name="luksgen$$_${lg_keysize}"
+
+  rm -f "${lg_file}"
+
+  truncate -s 20M "${lg_file}" 2>/dev/null
+
+  # 1000 is cryptsetup's floor, and the point here is to test the format rather
+  # than to wait for a realistic KDF
+  if ! sudo "${CRYPTSETUP_BIN}" luksFormat \
+      --batch-mode \
+      --type luks1 \
+      --cipher "${lg_cipher}-${lg_chain}" \
+      --key-size "${lg_keysize}" \
+      --hash "${lg_hash}" \
+      --pbkdf-force-iterations 1000 \
+      "${lg_file}" <<< "${CONTAINER_PASSWORD}" >/dev/null 2>&1; then
+    rm -f "${lg_file}"
+
+    record_skip "${hash_type}" "cryptsetup refused ${lg_hash} + ${lg_cipher}-${lg_chain} at ${lg_keysize} bits"
+    return 1
+  fi
+
+  # hashcat recognizes a correct LUKS password by the filesystem it uncovers, so
+  # the payload has to be a filesystem and not just bytes
+  if ! sudo "${CRYPTSETUP_BIN}" open "${lg_file}" "${lg_name}" <<< "${CONTAINER_PASSWORD}" >/dev/null 2>&1; then
+    rm -f "${lg_file}"
+
+    record_skip "${hash_type}" "could not open the generated ${lg_hash} + ${lg_cipher}-${lg_chain} container (device-mapper needs sudo)"
+    return 1
+  fi
+
+  sudo mkfs.ext4 -q "/dev/mapper/${lg_name}" >/dev/null 2>&1
+
+  sudo "${CRYPTSETUP_BIN}" close "${lg_name}" >/dev/null 2>&1
+
+  if [ ! -s "${lg_file}" ]; then
+    record_skip "${hash_type}" "the generated ${lg_hash} + ${lg_cipher}-${lg_chain} container came out empty"
+    return 1
+  fi
+
+  # luks_test reads the password out of a file named pw next to the containers,
+  # the same way the downloaded set ships one
+  echo "${CONTAINER_PASSWORD}" > "$(dirname "${lg_file}")/pw"
+
+  return 0
+}
+
 function truecrypt_test()
 {
   hashType=$1
@@ -3277,18 +3712,37 @@ function truecrypt_test()
   mkdir -p ${OUTD}/tc_tests
   chmod u+x "${TDIR}/truecrypt2hashcat.py"
 
+  # -g builds the volume before the case statement below reaches for it, because
+  # the 293xx branches extract the hash the moment they are evaluated.
+  if [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+    tcName=$(truecrypt_container_name "${hashType}" "${tcMode}")
+
+    if [ -n "${tcName}" ]; then
+      tcContainer="${TC_TESTS_DIR}/hashcat_${tcName}.tc"
+
+      if [ ! -f "${tcContainer}" ]; then
+        if [ "$(echo "${tcName}" | cut -d_ -f3)" = "boot" ]; then
+          record_skip "${hash_type}" "tcplay cannot create system-encryption (boot) volumes, so those stay on the containers in the tree"
+          return
+        fi
+
+        truecrypt_generate "$(echo "${tcName}" | cut -d_ -f1)" "$(echo "${tcName}" | cut -d_ -f2)" "${tcContainer}" || return
+      fi
+    fi
+  fi
+
   case $hashType in
 
     6211)
       case $tcMode in
         0)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6211 '${TDIR}/tc_tests/hashcat_ripemd160_aes.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6211 '${TC_TESTS_DIR}/hashcat_ripemd160_aes.tc' hashca?l"
           ;;
         1)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6211 '${TDIR}/tc_tests/hashcat_ripemd160_serpent.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6211 '${TC_TESTS_DIR}/hashcat_ripemd160_serpent.tc' hashca?l"
           ;;
         2)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6211 '${TDIR}/tc_tests/hashcat_ripemd160_twofish.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6211 '${TC_TESTS_DIR}/hashcat_ripemd160_twofish.tc' hashca?l"
           ;;
       esac
       ;;
@@ -3296,13 +3750,13 @@ function truecrypt_test()
     6212)
       case $tcMode in
         0)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6212 '${TDIR}/tc_tests/hashcat_ripemd160_aes-twofish.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6212 '${TC_TESTS_DIR}/hashcat_ripemd160_aes-twofish.tc' hashca?l"
           ;;
         1)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6212 '${TDIR}/tc_tests/hashcat_ripemd160_serpent-aes.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6212 '${TC_TESTS_DIR}/hashcat_ripemd160_serpent-aes.tc' hashca?l"
           ;;
         2)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6212 '${TDIR}/tc_tests/hashcat_ripemd160_twofish-serpent.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6212 '${TC_TESTS_DIR}/hashcat_ripemd160_twofish-serpent.tc' hashca?l"
           ;;
       esac
       ;;
@@ -3310,10 +3764,10 @@ function truecrypt_test()
     6213)
       case $tcMode in
         0)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6213 '${TDIR}/tc_tests/hashcat_ripemd160_aes-twofish-serpent.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6213 '${TC_TESTS_DIR}/hashcat_ripemd160_aes-twofish-serpent.tc' hashca?l"
           ;;
         1)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6213 '${TDIR}/tc_tests/hashcat_ripemd160_serpent-twofish-aes.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6213 '${TC_TESTS_DIR}/hashcat_ripemd160_serpent-twofish-aes.tc' hashca?l"
           ;;
       esac
       ;;
@@ -3321,13 +3775,13 @@ function truecrypt_test()
     6221)
       case $tcMode in
         0)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6221 '${TDIR}/tc_tests/hashcat_sha512_aes.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6221 '${TC_TESTS_DIR}/hashcat_sha512_aes.tc' hashca?l"
           ;;
         1)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6221 '${TDIR}/tc_tests/hashcat_sha512_serpent.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6221 '${TC_TESTS_DIR}/hashcat_sha512_serpent.tc' hashca?l"
           ;;
         2)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6221 '${TDIR}/tc_tests/hashcat_sha512_twofish.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6221 '${TC_TESTS_DIR}/hashcat_sha512_twofish.tc' hashca?l"
           ;;
       esac
       ;;
@@ -3335,13 +3789,13 @@ function truecrypt_test()
     6222)
       case $tcMode in
         0)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6222 '${TDIR}/tc_tests/hashcat_sha512_aes-twofish.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6222 '${TC_TESTS_DIR}/hashcat_sha512_aes-twofish.tc' hashca?l"
           ;;
         1)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6222 '${TDIR}/tc_tests/hashcat_sha512_serpent-aes.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6222 '${TC_TESTS_DIR}/hashcat_sha512_serpent-aes.tc' hashca?l"
           ;;
         2)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6222 '${TDIR}/tc_tests/hashcat_sha512_twofish-serpent.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6222 '${TC_TESTS_DIR}/hashcat_sha512_twofish-serpent.tc' hashca?l"
           ;;
       esac
       ;;
@@ -3349,10 +3803,10 @@ function truecrypt_test()
     6223)
       case $tcMode in
         0)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6223 '${TDIR}/tc_tests/hashcat_sha512_aes-twofish-serpent.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6223 '${TC_TESTS_DIR}/hashcat_sha512_aes-twofish-serpent.tc' hashca?l"
           ;;
         1)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6223 '${TDIR}/tc_tests/hashcat_sha512_serpent-twofish-aes.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6223 '${TC_TESTS_DIR}/hashcat_sha512_serpent-twofish-aes.tc' hashca?l"
           ;;
       esac
       ;;
@@ -3360,13 +3814,13 @@ function truecrypt_test()
     6231)
       case $tcMode in
         0)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6231 '${TDIR}/tc_tests/hashcat_whirlpool_aes.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6231 '${TC_TESTS_DIR}/hashcat_whirlpool_aes.tc' hashca?l"
           ;;
         1)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6231 '${TDIR}/tc_tests/hashcat_whirlpool_serpent.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6231 '${TC_TESTS_DIR}/hashcat_whirlpool_serpent.tc' hashca?l"
           ;;
         2)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6231 '${TDIR}/tc_tests/hashcat_whirlpool_twofish.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6231 '${TC_TESTS_DIR}/hashcat_whirlpool_twofish.tc' hashca?l"
           ;;
       esac
       ;;
@@ -3374,13 +3828,13 @@ function truecrypt_test()
     6232)
       case $tcMode in
         0)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6232 '${TDIR}/tc_tests/hashcat_whirlpool_aes-twofish.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6232 '${TC_TESTS_DIR}/hashcat_whirlpool_aes-twofish.tc' hashca?l"
           ;;
         1)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6232 '${TDIR}/tc_tests/hashcat_whirlpool_serpent-aes.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6232 '${TC_TESTS_DIR}/hashcat_whirlpool_serpent-aes.tc' hashca?l"
           ;;
         2)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6232 '${TDIR}/tc_tests/hashcat_whirlpool_twofish-serpent.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6232 '${TC_TESTS_DIR}/hashcat_whirlpool_twofish-serpent.tc' hashca?l"
           ;;
       esac
       ;;
@@ -3388,10 +3842,10 @@ function truecrypt_test()
     6233)
       case $tcMode in
         0)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6233 '${TDIR}/tc_tests/hashcat_whirlpool_aes-twofish-serpent.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6233 '${TC_TESTS_DIR}/hashcat_whirlpool_aes-twofish-serpent.tc' hashca?l"
           ;;
         1)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6233 '${TDIR}/tc_tests/hashcat_whirlpool_serpent-twofish-aes.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6233 '${TC_TESTS_DIR}/hashcat_whirlpool_serpent-twofish-aes.tc' hashca?l"
           ;;
       esac
       ;;
@@ -3399,13 +3853,13 @@ function truecrypt_test()
     6241)
       case $tcMode in
         0)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6241 '${TDIR}/tc_tests/hashcat_ripemd160_aes_boot.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6241 '${TC_TESTS_DIR}/hashcat_ripemd160_aes_boot.tc' hashca?l"
           ;;
         1)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6241 '${TDIR}/tc_tests/hashcat_ripemd160_serpent_boot.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6241 '${TC_TESTS_DIR}/hashcat_ripemd160_serpent_boot.tc' hashca?l"
           ;;
         2)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6241 '${TDIR}/tc_tests/hashcat_ripemd160_twofish_boot.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6241 '${TC_TESTS_DIR}/hashcat_ripemd160_twofish_boot.tc' hashca?l"
           ;;
       esac
       ;;
@@ -3413,10 +3867,10 @@ function truecrypt_test()
     6242)
       case $tcMode in
         0)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6242 '${TDIR}/tc_tests/hashcat_ripemd160_aes-twofish_boot.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6242 '${TC_TESTS_DIR}/hashcat_ripemd160_aes-twofish_boot.tc' hashca?l"
           ;;
         1)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6242 '${TDIR}/tc_tests/hashcat_ripemd160_serpent-aes_boot.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6242 '${TC_TESTS_DIR}/hashcat_ripemd160_serpent-aes_boot.tc' hashca?l"
           ;;
       esac
       ;;
@@ -3424,7 +3878,7 @@ function truecrypt_test()
     6243)
       case $tcMode in
         0)
-          CMD="./${BIN} ${OPTS} -a 3 -m 6243 '${TDIR}/tc_tests/hashcat_ripemd160_aes-twofish-serpent_boot.tc' hashca?l"
+          CMD="./${BIN} ${OPTS} -a 3 -m 6243 '${TC_TESTS_DIR}/hashcat_ripemd160_aes-twofish-serpent_boot.tc' hashca?l"
           ;;
       esac
       ;;
@@ -3432,15 +3886,15 @@ function truecrypt_test()
     29311)
       case $tcMode in
         0)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_aes.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_aes.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_aes.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_aes.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29311 '${OUTD}/tc_tests/hashcat_ripemd160_aes.hash' hashca?l"
           ;;
         1)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_serpent.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_serpent.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_serpent.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_serpent.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29311 '${OUTD}/tc_tests/hashcat_ripemd160_serpent.hash' hashca?l"
           ;;
         2)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_twofish.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_twofish.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_twofish.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_twofish.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29311 '${OUTD}/tc_tests/hashcat_ripemd160_twofish.hash' hashca?l"
           ;;
       esac
@@ -3449,15 +3903,15 @@ function truecrypt_test()
     29312)
       case $tcMode in
         0)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_aes-twofish.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_aes-twofish.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_aes-twofish.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_aes-twofish.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29312 '${OUTD}/tc_tests/hashcat_ripemd160_aes-twofish.hash' hashca?l"
           ;;
         1)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_serpent-aes.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_serpent-aes.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_serpent-aes.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_serpent-aes.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29312 '${OUTD}/tc_tests/hashcat_ripemd160_serpent-aes.hash' hashca?l"
           ;;
         2)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_twofish-serpent.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_twofish-serpent.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_twofish-serpent.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_twofish-serpent.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29312 '${OUTD}/tc_tests/hashcat_ripemd160_twofish-serpent.hash' hashca?l"
           ;;
       esac
@@ -3466,11 +3920,11 @@ function truecrypt_test()
     29313)
       case $tcMode in
         0)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_aes-twofish-serpent.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_aes-twofish-serpent.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_aes-twofish-serpent.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_aes-twofish-serpent.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29313 '${OUTD}/tc_tests/hashcat_ripemd160_aes-twofish-serpent.hash' hashca?l"
           ;;
         1)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_serpent-twofish-aes.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_serpent-twofish-aes.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_serpent-twofish-aes.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_serpent-twofish-aes.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29313 '${OUTD}/tc_tests/hashcat_ripemd160_serpent-twofish-aes.hash' hashca?l"
           ;;
       esac
@@ -3479,15 +3933,15 @@ function truecrypt_test()
     29321)
       case $tcMode in
         0)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_sha512_aes.tc\" > ${OUTD}/tc_tests/hashcat_sha512_aes.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_sha512_aes.tc\" > ${OUTD}/tc_tests/hashcat_sha512_aes.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29321 '${OUTD}/tc_tests/hashcat_sha512_aes.hash' hashca?l"
           ;;
         1)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_sha512_serpent.tc\" > ${OUTD}/tc_tests/hashcat_sha512_serpent.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_sha512_serpent.tc\" > ${OUTD}/tc_tests/hashcat_sha512_serpent.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29321 '${OUTD}/tc_tests/hashcat_sha512_serpent.hash' hashca?l"
           ;;
         2)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_sha512_twofish.tc\" > ${OUTD}/tc_tests/hashcat_sha512_twofish.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_sha512_twofish.tc\" > ${OUTD}/tc_tests/hashcat_sha512_twofish.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29321 '${OUTD}/tc_tests/hashcat_sha512_twofish.hash' hashca?l"
           ;;
       esac
@@ -3496,15 +3950,15 @@ function truecrypt_test()
     29322)
       case $tcMode in
         0)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_sha512_aes-twofish.tc\" > ${OUTD}/tc_tests/hashcat_sha512_aes-twofish.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_sha512_aes-twofish.tc\" > ${OUTD}/tc_tests/hashcat_sha512_aes-twofish.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29322 '${OUTD}/tc_tests/hashcat_sha512_aes-twofish.hash' hashca?l"
           ;;
         1)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_sha512_serpent-aes.tc\" > ${OUTD}/tc_tests/hashcat_sha512_serpent-aes.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_sha512_serpent-aes.tc\" > ${OUTD}/tc_tests/hashcat_sha512_serpent-aes.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29322 '${OUTD}/tc_tests/hashcat_sha512_serpent-aes.hash' hashca?l"
           ;;
         2)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_sha512_twofish-serpent.tc\" > ${OUTD}/tc_tests/hashcat_sha512_twofish-serpent.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_sha512_twofish-serpent.tc\" > ${OUTD}/tc_tests/hashcat_sha512_twofish-serpent.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29322 '${OUTD}/tc_tests/hashcat_sha512_twofish-serpent.hash' hashca?l"
           ;;
       esac
@@ -3513,11 +3967,11 @@ function truecrypt_test()
     29323)
       case $tcMode in
         0)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_sha512_aes-twofish-serpent.tc\" > ${OUTD}/tc_tests/hashcat_sha512_aes-twofish-serpent.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_sha512_aes-twofish-serpent.tc\" > ${OUTD}/tc_tests/hashcat_sha512_aes-twofish-serpent.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29323 '${OUTD}/tc_tests/hashcat_sha512_aes-twofish-serpent.hash' hashca?l"
           ;;
         1)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_sha512_serpent-twofish-aes.tc\" > ${OUTD}/tc_tests/hashcat_sha512_serpent-twofish-aes.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_sha512_serpent-twofish-aes.tc\" > ${OUTD}/tc_tests/hashcat_sha512_serpent-twofish-aes.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29323 '${OUTD}/tc_tests/hashcat_sha512_serpent-twofish-aes.hash' hashca?l"
           ;;
       esac
@@ -3526,15 +3980,15 @@ function truecrypt_test()
     29331)
       case $tcMode in
         0)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_whirlpool_aes.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_aes.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_whirlpool_aes.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_aes.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29331 '${OUTD}/tc_tests/hashcat_whirlpool_aes.hash' hashca?l"
           ;;
         1)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_whirlpool_serpent.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_serpent.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_whirlpool_serpent.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_serpent.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29331 '${OUTD}/tc_tests/hashcat_whirlpool_serpent.hash' hashca?l"
           ;;
         2)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_whirlpool_twofish.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_twofish.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_whirlpool_twofish.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_twofish.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29331 '${OUTD}/tc_tests/hashcat_whirlpool_twofish.hash' hashca?l"
           ;;
       esac
@@ -3543,15 +3997,15 @@ function truecrypt_test()
     29332)
       case $tcMode in
         0)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_whirlpool_aes-twofish.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_aes-twofish.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_whirlpool_aes-twofish.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_aes-twofish.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29332 '${OUTD}/tc_tests/hashcat_whirlpool_aes-twofish.hash' hashca?l"
           ;;
         1)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_whirlpool_serpent-aes.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_serpent-aes.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_whirlpool_serpent-aes.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_serpent-aes.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29332 '${OUTD}/tc_tests/hashcat_whirlpool_serpent-aes.hash' hashca?l"
           ;;
         2)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_whirlpool_twofish-serpent.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_twofish-serpent.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_whirlpool_twofish-serpent.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_twofish-serpent.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29332 '${OUTD}/tc_tests/hashcat_whirlpool_twofish-serpent.hash' hashca?l"
           ;;
       esac
@@ -3560,11 +4014,11 @@ function truecrypt_test()
     29333)
       case $tcMode in
         0)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_whirlpool_aes-twofish-serpent.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_aes-twofish-serpent.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_whirlpool_aes-twofish-serpent.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_aes-twofish-serpent.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29333 '${OUTD}/tc_tests/hashcat_whirlpool_aes-twofish-serpent.hash' hashca?l"
           ;;
         1)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_whirlpool_serpent-twofish-aes.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_serpent-twofish-aes.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_whirlpool_serpent-twofish-aes.tc\" > ${OUTD}/tc_tests/hashcat_whirlpool_serpent-twofish-aes.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29333 '${OUTD}/tc_tests/hashcat_whirlpool_serpent-twofish-aes.hash' hashca?l"
           ;;
       esac
@@ -3573,15 +4027,15 @@ function truecrypt_test()
     29341)
       case $tcMode in
         0)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_aes_boot.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_aes_boot.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_aes_boot.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_aes_boot.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29341 '${OUTD}/tc_tests/hashcat_ripemd160_aes_boot.hash' hashca?l"
           ;;
         1)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_serpent_boot.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_serpent_boot.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_serpent_boot.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_serpent_boot.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29341 '${OUTD}/tc_tests/hashcat_ripemd160_serpent_boot.hash' hashca?l"
           ;;
         2)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_twofish_boot.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_twofish_boot.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_twofish_boot.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_twofish_boot.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29341 '${OUTD}/tc_tests/hashcat_ripemd160_twofish_boot.hash' hashca?l"
           ;;
       esac
@@ -3590,11 +4044,11 @@ function truecrypt_test()
     29342)
       case $tcMode in
         0)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_aes-twofish_boot.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_aes-twofish_boot.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_aes-twofish_boot.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_aes-twofish_boot.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29342 '${OUTD}/tc_tests/hashcat_ripemd160_aes-twofish_boot.hash' hashca?l"
           ;;
         1)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_serpent-aes_boot.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_serpent-aes_boot.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_serpent-aes_boot.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_serpent-aes_boot.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29342 '${OUTD}/tc_tests/hashcat_ripemd160_serpent-aes_boot.hash' hashca?l"
           ;;
       esac
@@ -3603,7 +4057,7 @@ function truecrypt_test()
     29343)
       case $tcMode in
         0)
-          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TDIR}/tc_tests/hashcat_ripemd160_aes-twofish-serpent_boot.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_aes-twofish-serpent_boot.hash
+          eval \"${TDIR}/truecrypt2hashcat.py\" \"${TC_TESTS_DIR}/hashcat_ripemd160_aes-twofish-serpent_boot.tc\" > ${OUTD}/tc_tests/hashcat_ripemd160_aes-twofish-serpent_boot.hash
           CMD="./${BIN} ${OPTS} -a 3 -m 29343 '${OUTD}/tc_tests/hashcat_ripemd160_aes-twofish-serpent_boot.hash' hashca?l"
           ;;
       esac
@@ -3693,7 +4147,11 @@ function veracrypt_test()
 
   [ -n "$cipher_cascade" ] || return
 
-  filename="${TDIR}/vc_tests/hashcat_${hash_function}_${cipher_cascade}.vc"
+  filename="${VC_TESTS_DIR}/hashcat_${hash_function}_${cipher_cascade}.vc"
+
+  if [[ "${GENERATE_CONTAINERS}" -eq 1 ]] && [ ! -f "${filename}" ]; then
+    veracrypt_generate "${hash_function}" "${cipher_cascade}" "${filename}" || return
+  fi
 
   # The hash-cipher combination might be invalid (e.g. RIPEMD-160 + Kuznyechik)
   [ -f "${filename}" ] || return
@@ -3707,7 +4165,7 @@ function veracrypt_test()
       mkdir -p ${OUTD}/vc_tests
       chmod u+x "${TDIR}/veracrypt2hashcat.py"
 
-      eval \"${TDIR}/veracrypt2hashcat.py\" \"${TDIR}/vc_tests/hashcat_${hash_function}_${cipher_cascade}.vc\" > ${OUTD}/vc_tests/hashcat_${hash_function}_${cipher_cascade}.hash
+      eval \"${TDIR}/veracrypt2hashcat.py\" \"${VC_TESTS_DIR}/hashcat_${hash_function}_${cipher_cascade}.vc\" > ${OUTD}/vc_tests/hashcat_${hash_function}_${cipher_cascade}.hash
       CMD="./${BIN} ${OPTS} -a 3 -m ${hash_type} '${OUTD}/vc_tests/hashcat_${hash_function}_${cipher_cascade}.hash' hashc?lt"
       ;;
   esac
@@ -3867,12 +4325,12 @@ function luks_test()
       luksPassPartFile1="${OUTD}/${hashType}_dict1"
       luksPassPartFile2="${OUTD}/${hashType}_dict2"
 
-      luksContainer="${TDIR}/luks_tests/hashcat_${luksHash}_${luksCipher}_${luksMode}_${luksKeySize}.luks"
+      luksContainer="${LUKS_TESTS_DIR}/hashcat_${luksHash}_${luksCipher}_${luksMode}_${luksKeySize}.luks"
       luksHashFile="${OUTD}/luks_tests/hashcat_${luksHash}_${luksCipher}_${luksMode}_${luksKeySize}.hash"
 
       case $attackType in
         0)
-          CMD="./${BIN} ${OPTS} -a 0 -m ${hashType} '${luksHashFile}' '${TDIR}/luks_tests/pw'"
+          CMD="./${BIN} ${OPTS} -a 0 -m ${hashType} '${luksHashFile}' '${LUKS_TESTS_DIR}/pw'"
           ;;
         1)
           luksPassPart1Len=$((${#LUKS_PASSWORD} / 2))
@@ -3905,21 +4363,30 @@ function luks_test()
           ;;
       esac
 
+      if [[ "${GENERATE_CONTAINERS}" -eq 1 ]] && [ ! -f "${luksContainer}" ]; then
+        luks1_generate "${luksHash}" "${luksCipher}" "${luksMode}" "${luksKeySize}" "${luksContainer}" || continue
+      fi
+
+      if [ ! -f "${luksContainer}" ]; then
+        record_skip "${hash_type}" "no container for ${luksHash} ${luksCipher} ${luksMode} at ${luksKeySize} bits"
+        continue
+      fi
+
       eval \"${TDIR}/luks2hashcat.py\" \"${luksContainer}\" > "${luksHashFile}"
 
-      luksMode="${luksHash}-${luksCipher}-${luksMode}-${luksKeySize}"
+      # A separate name for the label. Writing it back into luksMode used to
+      # clobber the loop variable, so the next key size never matched the filter
+      # above and every chain mode was tested at one key size instead of the two
+      # or three it has.
+      luksLabel="${luksHash}-${luksCipher}-${luksMode}-${luksKeySize}"
 
       if [ -n "${CMD}" ] && [ ${#CMD} -gt 5 ]; then
-        echo "> Testing hash type ${hashType} with attack mode ${attackType}, markov ${MARKOV}, single hash, Device-Type ${DEVICE_TYPE}, Kernel-Type ${KERNEL_TYPE}, Vector-Width ${VECTOR}, Luks-Mode ${luksMode}" >> "${OUTD}/logfull.txt" 2>> "${OUTD}/logfull.txt"
+        echo "> Testing hash type ${hashType} with attack mode ${attackType}, markov ${MARKOV}, single hash, Device-Type ${DEVICE_TYPE}, Kernel-Type ${KERNEL_TYPE}, Vector-Width ${VECTOR}, Luks-Mode ${luksLabel}" >> "${OUTD}/logfull.txt" 2>> "${OUTD}/logfull.txt"
 
-        if [ -f "${luks_first_test_file}" ]; then
-          output=$(eval ${CMD} 2>&1)
-          ret=${?}
+        output=$(eval ${CMD} 2>&1)
+        ret=${?}
 
-          echo "${output}" >> "${OUTD}/logfull.txt"
-        else
-          ret=30
-        fi
+        echo "${output}" >> "${OUTD}/logfull.txt"
 
         e_ce=0
         e_rs=0
@@ -3944,7 +4411,7 @@ function luks_test()
           msg="Warning"
         fi
 
-        echo "[ ${OUTD} ] [ Type ${hash_type}, Attack ${attackType}, Mode single, Device-Type ${DEVICE_TYPE}, Kernel-Type ${KERNEL_TYPE}, Vector-Width ${VECTOR}, Luks-Mode ${luksMode} ] > $msg : ${e_nf}/${cnt} not found, ${e_nm}/${cnt} not matched, ${e_to}/${cnt} timeout, ${e_rs}/${cnt} skipped"
+        echo "[ ${OUTD} ] [ Type ${hash_type}, Attack ${attackType}, Mode single, Device-Type ${DEVICE_TYPE}, Kernel-Type ${KERNEL_TYPE}, Vector-Width ${VECTOR}, Luks-Mode ${luksLabel} ] > $msg : ${e_nf}/${cnt} not found, ${e_nm}/${cnt} not matched, ${e_to}/${cnt} timeout, ${e_rs}/${cnt} skipped"
 
         status ${ret}
       fi
@@ -3970,7 +4437,7 @@ function luks_legacy_test()
   LUKS_CIPHER_MODES="cbc-essiv cbc-plain64 xts-plain64"
   LUKS_KEYSIZES="128 256 512"
 
-  LUKS_PASSWORD=$(cat "${TDIR}/luks_tests/pw" 2>/dev/null)
+  LUKS_PASSWORD=$(cat "${LUKS_TESTS_DIR}/pw" 2>/dev/null)
 
   for luks_h in ${LUKS_HASHES}; do
     for luks_c in ${LUKS_CIPHERS}; do
@@ -4012,7 +4479,7 @@ function luks_legacy_test()
           esac
 
           luks_mode="${luks_h}-${luks_c}-${luks_m}-${luks_k}"
-          luks_file="${TDIR}/luks_tests/hashcat_${luks_h}_${luks_c}_${luks_m}_${luks_k}.luks"
+          luks_file="${LUKS_TESTS_DIR}/hashcat_${luks_h}_${luks_c}_${luks_m}_${luks_k}.luks"
           luks_main_mask="?l"
           luks_mask="${luks_main_mask}"
 
@@ -4022,7 +4489,7 @@ function luks_legacy_test()
 
           case $attackType in
             0)
-              CMD="./${BIN} ${OPTS} -a 0 -m ${hashType} '${luks_file}' '${TDIR}/luks_tests/pw'"
+              CMD="./${BIN} ${OPTS} -a 0 -m ${hashType} '${luks_file}' '${LUKS_TESTS_DIR}/pw'"
               ;;
             1)
               luks_pass_part1_len=$((${#LUKS_PASSWORD} / 2))
@@ -4213,6 +4680,916 @@ function luks2_test()
 }
 
 
+# A test that cannot run is recorded here as well as printed, and the whole list
+# is printed again as one block when the run ends. A single Skip line in the
+# middle of thousands of lines of output is easy to miss, and a mode that
+# quietly did nothing looks exactly like a mode that passed.
+SKIPPED_LIST=""
+
+function record_skip()
+{
+  # $1 = hashType, $2 = reason
+  SKIPPED_LIST="${SKIPPED_LIST}${1}|Skip|${2}
+"
+
+  echo "[ ${OUTD} ] [ Type ${1} ] > Skip : ${2}"
+}
+
+function record_note()
+{
+  # Like record_skip, but for a test that did run while covering less than it
+  # normally would, e.g. a GPG mode tested without gpg1 so only some of its
+  # ciphers were produced.
+  # $1 = hashType, $2 = reason
+  SKIPPED_LIST="${SKIPPED_LIST}${1}|Note|${2}
+"
+
+  echo "[ ${OUTD} ] [ Type ${1} ] > Note : ${2}"
+}
+
+function record_error()
+{
+  # A container test that was supposed to run and could not produce its input.
+  # Unlike a skip this is a fault rather than a missing tool, but it has the
+  # same failure mode of being invisible, so it goes in the same summary.
+  # $1 = hashType, $2 = reason
+  SKIPPED_LIST="${SKIPPED_LIST}${1}|Error|${2}
+"
+
+  echo "[ ${OUTD} ] [ Type ${1} ] > Error : ${2}"
+}
+
+function print_skip_summary()
+{
+  if [ -z "${SKIPPED_LIST}" ]; then
+    return
+  fi
+
+  # the same reason is recorded once per vector width and per attack mode, so
+  # collapse repeats and keep the order they first appeared in
+  local unique
+  unique=$(printf '%s' "${SKIPPED_LIST}" | awk '!seen[$0]++')
+
+  local count
+  count=$(printf '%s\n' "${unique}" | grep -c '')
+
+  echo ""
+  echo "[ ${OUTD} ] > ${count} test(s) did not run in full:"
+
+  printf '%s\n' "${unique}" | while IFS='|' read -r sk_type sk_kind sk_reason; do
+    echo "[ ${OUTD} ] [ Type ${sk_type} ] > ${sk_kind} : ${sk_reason}"
+  done
+
+  echo ""
+}
+
+function container_run_and_report()
+{
+  # $1 = CMD, $2 = hashType, $3 = attackType, $4 = label (e.g. "GPG-src gpg1-sha1-aes")
+  local CMD="$1"
+  local rt_hashType="$2"
+  local rt_attackType="$3"
+  local rt_label="$4"
+
+  local output ret
+  e_ce=0; e_rs=0; e_to=0; e_nf=0; e_nm=0; cnt=0
+
+  echo "> Testing hash type ${rt_hashType} with attack mode ${rt_attackType}, markov ${MARKOV}, single hash, Device-Type ${DEVICE_TYPE}, Kernel-Type ${KERNEL_TYPE}, Vector-Width ${VECTOR}, ${rt_label}" >> "${OUTD}/logfull.txt" 2>> "${OUTD}/logfull.txt"
+
+  output=$(eval ${CMD} 2>&1)
+  ret=${?}
+
+  echo "${output}" >> "${OUTD}/logfull.txt"
+
+  status ${ret}
+
+  cnt=1
+
+  local msg="OK"
+  if [ "${e_ce}" -ne 0 ]; then
+    msg="Compare Error"
+  elif [ "${e_rs}" -ne 0 ]; then
+    msg="Skip"
+  elif [ "${e_nf}" -ne 0 ] || [ "${e_nm}" -ne 0 ] || [ "${cnt}" -eq 0 ]; then
+    msg="Error"
+  elif [ "${e_to}" -ne 0 ]; then
+    msg="Warning"
+  fi
+
+  echo "[ ${OUTD} ] [ Type ${rt_hashType}, Attack ${rt_attackType}, Mode single, Device-Type ${DEVICE_TYPE}, Kernel-Type ${KERNEL_TYPE}, Vector-Width ${VECTOR}, ${rt_label} ] > $msg : ${e_nf}/${cnt} not found, ${e_nm}/${cnt} not matched, ${e_to}/${cnt} timeout, ${e_rs}/${cnt} skipped"
+
+  status ${ret}
+}
+
+function build_container_cmd()
+{
+  # Build the hashcat command line for a real crypto-container hash, given the
+  # known password. Mirrors luks2_test()'s per-attack handling.
+  # $1 = hashType, $2 = attackType, $3 = hashFile, $4 = password
+  # result in the global CONTAINER_CMD
+  local bc_hashType="$1"
+  local bc_attackType="$2"
+  local bc_hashFile="$3"
+  local bc_password="$4"
+
+  local dictFile1="${OUTD}/${bc_hashType}_cont_dict1"
+  local dictFile2="${OUTD}/${bc_hashType}_cont_dict2"
+  local mainMask="?l"
+  local mask="${mainMask}"
+
+  CONTAINER_CMD=""
+
+  case ${bc_attackType} in
+    0)
+      echo "${bc_password}" > "${dictFile1}" 2>/dev/null
+      CONTAINER_CMD="./${BIN} ${OPTS} -a 0 -m ${bc_hashType} '${bc_hashFile}' ${dictFile1}"
+      ;;
+    1)
+      local part1Len=$((${#bc_password} / 2))
+      local part2Start=$((part1Len + 1))
+
+      echo "${bc_password}" | cut -c-${part1Len}    > "${dictFile1}" 2>/dev/null
+      echo "${bc_password}" | cut -c${part2Start}-  > "${dictFile2}" 2>/dev/null
+
+      CONTAINER_CMD="./${BIN} ${OPTS} -a 1 -m ${bc_hashType} '${bc_hashFile}' ${dictFile1} ${dictFile2}"
+      ;;
+    3)
+      local maskFixedLen=$((${#bc_password} - 1))
+
+      mask="$(echo "${bc_password}" | cut -c-${maskFixedLen} 2>/dev/null)"
+      mask="${mask}${mainMask}"
+
+      CONTAINER_CMD="./${BIN} ${OPTS} -a 3 -m ${bc_hashType} '${bc_hashFile}' ${mask}"
+      ;;
+    6)
+      local part1Len=$((${#bc_password} - 1))
+
+      echo "${bc_password}" | cut -c-${part1Len} > "${dictFile1}" 2>/dev/null
+
+      CONTAINER_CMD="./${BIN} ${OPTS} -a 6 -m ${bc_hashType} '${bc_hashFile}' ${dictFile1} ${mask}"
+      ;;
+    7)
+      echo "${bc_password}" | cut -c2- > "${dictFile1}" 2>/dev/null
+
+      CONTAINER_CMD="./${BIN} ${OPTS} -a 7 -m ${bc_hashType} '${bc_hashFile}' ${mask} ${dictFile1}"
+      ;;
+  esac
+}
+
+function pkzip_test()
+{
+  # Real-container test for the traditional PKWARE / ZipCrypto modes.
+  # Builds genuine archives with InfoZip 'zip', extracts the hash with John's
+  # zip2john, and confirms hashcat cracks the known password. This is the
+  # ground-truth complement to the self-contained test.pl oracles.
+  hashType=$1
+  attackType=$2
+
+  # PKZIP is a fast hash with separate a0/a1/a3 kernels, so when no attack was
+  # forced ("all") we exercise 0/1/3 to cover each kernel rather than only a0.
+  local attackList
+  if [ "${attackType}" -eq 65535 ]; then
+    attackList="0 1 3"
+  else
+    attackList="${attackType}"
+  fi
+
+  local ZIP_BIN="${ZIP_BIN:-zip}"
+  local ZIP2JOHN="${ZIP2JOHN:-$(command -v zip2john 2>/dev/null || echo "${HOME}/john/run/zip2john")}"
+
+  if ! command -v "${ZIP_BIN}" >/dev/null 2>&1; then
+    record_skip "${hashType}" "'zip' not found (install InfoZip zip)"
+    return
+  fi
+  if [ ! -x "${ZIP2JOHN}" ] && ! command -v "${ZIP2JOHN}" >/dev/null 2>&1; then
+    record_skip "${hashType}" "zip2john not found (set ZIP2JOHN=/path/to/zip2john)"
+    return
+  fi
+
+  local password="hashcat"
+  local zdir="${OUTD}/pkzip_tests"
+  local sdir="${zdir}/src"
+  mkdir -p "${sdir}"
+
+  # a few compressible text files + one incompressible blob (forces a stored entry)
+  local i
+  for i in 1 2 3 4; do
+    yes "pattern ${i} the quick brown fox " 2>/dev/null | head -c 8000 > "${sdir}/t${i}.txt"
+  done
+  head -c 64 /dev/urandom > "${sdir}/rand.bin"
+
+  local zf="${zdir}/${hashType}.zip"
+  local j2jflag=""
+  rm -f "${zf}"
+
+  case ${hashType} in
+    17200) "${ZIP_BIN}" -9 -e -P "${password}" "${zf}" "${sdir}/t1.txt" >/dev/null 2>&1 ;;
+    17210) "${ZIP_BIN}" -0 -e -P "${password}" "${zf}" "${sdir}/t1.txt" >/dev/null 2>&1 ;;
+    17220) "${ZIP_BIN}" -9 -e -P "${password}" "${zf}" "${sdir}/t1.txt" "${sdir}/t2.txt" "${sdir}/t3.txt" >/dev/null 2>&1 ;;
+    17225) "${ZIP_BIN}" -e    -P "${password}" "${zf}" "${sdir}/t1.txt" "${sdir}/rand.bin" "${sdir}/t2.txt" >/dev/null 2>&1 ;;
+    17230) "${ZIP_BIN}" -9 -e -P "${password}" "${zf}" "${sdir}/t1.txt" "${sdir}/t2.txt" "${sdir}/t3.txt" "${sdir}/t4.txt" >/dev/null 2>&1; j2jflag="-c" ;;
+    *) record_skip "${hashType}" "unsupported PKZIP mode for -g"; return ;;
+  esac
+
+  local hashFile="${zdir}/${hashType}.hash"
+  "${ZIP2JOHN}" ${j2jflag} "${zf}" 2>/dev/null | sed -E 's/^[^:]*://' | grep -oE '^\$pkzip2?\$[^:]+' | head -1 > "${hashFile}"
+
+  if [ ! -s "${hashFile}" ]; then
+    record_error "${hashType}" "zip2john produced no hash for ${zf}"
+    return
+  fi
+
+  local at
+  for at in ${attackList}; do
+    build_container_cmd "${hashType}" "${at}" "${hashFile}" "${password}"
+
+    if [ -n "${CONTAINER_CMD}" ]; then
+      container_run_and_report "${CONTAINER_CMD}" "${hashType}" "${at}" "PKZIP-container"
+    fi
+  done
+}
+
+function gpg_test()
+{
+  # Real-container test for the GPG secret-key modes. gpg1 (GnuPG 1.4) is used
+  # for the classic CFB S2K variants because it honours --s2k-digest-algo /
+  # --s2k-cipher-algo directly; gpg2 (GnuPG 2.x) is used for the AEAD/OCB path
+  # and as a second producer for the default SHA1/AES key. gpg2john extracts the
+  # $gpg$ hash and hashcat cracks the known passphrase.
+  hashType=$1
+  attackType=$2
+
+  if [ "${attackType}" -eq 65535 ]; then
+    attackType=0
+  fi
+
+  local GPG1_BIN="${GPG1_BIN:-gpg1}"
+  local GPG2_BIN="${GPG2_BIN:-gpg}"
+  local GPG2JOHN="${GPG2JOHN:-$(command -v gpg2john 2>/dev/null || echo "${HOME}/john/run/gpg2john")}"
+  local GPG_OCB_EXTRACT="${GPG_OCB_EXTRACT:-${TDIR}/gpg-ocb-aes2hashcat.py}"
+
+  if [ ! -x "${GPG2JOHN}" ] && ! command -v "${GPG2JOHN}" >/dev/null 2>&1; then
+    record_skip "${hashType}" "gpg2john not found (set GPG2JOHN=/path/to/gpg2john)"
+    return
+  fi
+
+  if ! command -v "${GPG1_BIN}" >/dev/null 2>&1; then
+    record_note "${hashType}" "${GPG1_BIN} (GnuPG 1.x) not found, so the classic S2K variants and the AES-128 (aux1) path are skipped; set GPG1_BIN=... if installed elsewhere"
+  fi
+
+  local password="hashcat"
+  local gdir="${OUTD}/gpg_tests"
+  mkdir -p "${gdir}"
+
+  # Each producer appends "label|hashfile" lines to this list.
+  local producers=""
+
+  gpg1_key() { # digest cipher label
+    command -v "${GPG1_BIN}" >/dev/null 2>&1 || return
+    local dg="$1" ci="$2" label="$3"
+    local H; H="$(mktemp -d)"
+    "${GPG1_BIN}" --homedir "${H}" --batch --no-tty --s2k-digest-algo "${dg}" --s2k-cipher-algo "${ci}" --s2k-mode 3 --s2k-count 65536 --gen-key >/dev/null 2>&1 <<EOF
+Key-Type: RSA
+Key-Length: 1024
+Key-Usage: sign
+Name-Real: ${label}
+Name-Email: ${label}@hashcat.test
+Passphrase: ${password}
+Expire-Date: 0
+%commit
+EOF
+    local hf="${gdir}/${hashType}_${label}.hash"
+    "${GPG2JOHN}" "${H}/secring.gpg" 2>/dev/null | sed -E 's/^[^:]*://' | grep -oE '^\$gpg\$[^:]*' | head -1 > "${hf}"
+    rm -rf "${H}"
+    [ -s "${hf}" ] && producers="${producers} ${label}|${hf}"
+  }
+
+  gpg2_key() { # label extra_args...
+    command -v "${GPG2_BIN}" >/dev/null 2>&1 || return
+    local label="$1"; shift
+    local H; H="$(mktemp -d)"
+    "${GPG2_BIN}" --homedir "${H}" --batch --pinentry-mode loopback --passphrase "${password}" "$@" --quick-generate-key "${label} <${label}@hashcat.test>" rsa1024 sign 0 >/dev/null 2>&1
+    local sk="${gdir}/${hashType}_${label}.sk.gpg"
+    "${GPG2_BIN}" --homedir "${H}" --batch --pinentry-mode loopback --passphrase "${password}" --export-secret-keys 2>/dev/null > "${sk}"
+    local hf="${gdir}/${hashType}_${label}.hash"
+    "${GPG2JOHN}" "${sk}" 2>/dev/null | sed -E 's/^[^:]*://' | grep -oE '^\$gpg\$[^:]*' | head -1 > "${hf}"
+    rm -rf "${H}"
+    [ -s "${hf}" ] && producers="${producers} ${label}|${hf}"
+  }
+
+  gpg2_ocb_key() { # label keytype: GnuPG 2.3+ on-disk OCB key (openpgp-s2k3-ocb-aes).
+                   # keytype is the gpg key algo; the 17050 kernel verifies the decrypted
+                   # secret S-expression, which starts "(((1:d<len>:" for both ECC/ed25519
+                   # (32-byte d) and RSA (256/512-byte d), so both key types are covered.
+    command -v "${GPG2_BIN}" >/dev/null 2>&1 || return
+    [ -f "${GPG_OCB_EXTRACT}" ] || { record_skip "${hashType}" "${GPG_OCB_EXTRACT} not found"; return; }
+    local label="$1"
+    local keytype="$2"
+    local H; H="$(mktemp -d)"
+    "${GPG2_BIN}" --homedir "${H}" --batch --pinentry-mode loopback --passphrase "${password}" --quick-generate-key "${label} <${label}@hashcat.test>" "${keytype}" sign 0 >/dev/null 2>&1
+    local kf; kf="$(ls "${H}"/private-keys-v1.d/*.key 2>/dev/null | head -1)"
+    local hf="${gdir}/${hashType}_${label}.hash"
+    if [ -n "${kf}" ] && grep -aq 'openpgp-s2k3-ocb-aes' "${kf}" 2>/dev/null; then
+      python3 "${GPG_OCB_EXTRACT}" "${kf}" 2>/dev/null | grep -oE '^\$gpg\$[^:]*' | head -1 > "${hf}"
+    fi
+    rm -rf "${H}"
+    [ -s "${hf}" ] && producers="${producers} ${label}|${hf}"
+  }
+
+  case ${hashType} in
+    # 17010/17020/17030 each have two runtime cipher paths in the kernel, aux1
+    # (AES-128) and aux2 (AES-256), picked from the key's cipher_algo, so
+    # generate one container for each to exercise both. 17040 (CAST5) is a single
+    # path (no aux kernels).
+    17010) gpg1_key SHA1   AES    gpg1-sha1-aes128;   gpg1_key SHA1   AES256 gpg1-sha1-aes256;   gpg2_key gpg2-default ;;
+    17020) gpg1_key SHA512 AES    gpg1-sha512-aes128; gpg1_key SHA512 AES256 gpg1-sha512-aes256 ;;
+    17030) gpg1_key SHA256 AES    gpg1-sha256-aes128; gpg1_key SHA256 AES256 gpg1-sha256-aes256 ;;
+    17040) gpg1_key SHA1   CAST5  gpg1-sha1-cast5 ;;
+    17050) gpg2_ocb_key gpg2-ed25519-ocb ed25519; gpg2_ocb_key gpg2-rsa2048-ocb rsa2048 ;;
+    *) record_skip "${hashType}" "unsupported GPG mode for -g"; return ;;
+  esac
+
+  if [ -z "${producers}" ]; then
+    record_skip "${hashType}" "could not generate a matching GPG container (gpg1/gpg2 unavailable or mode unsupported by local tools)"
+    return
+  fi
+
+  local entry label hf
+  for entry in ${producers}; do
+    label="${entry%%|*}"
+    hf="${entry##*|}"
+
+    build_container_cmd "${hashType}" "${attackType}" "${hf}" "${password}"
+
+    if [ -n "${CONTAINER_CMD}" ]; then
+      container_run_and_report "${CONTAINER_CMD}" "${hashType}" "${attackType}" "GPG-container ${label}"
+    fi
+  done
+}
+
+function rar_test()
+{
+  # Real-container test for RAR. Builds genuine archives with the RARLAB 'rar'
+  # CLI, extracts the hash with John's rar2john, and confirms hashcat cracks the
+  # known password, the ground-truth complement to the RAR test.pl oracles.
+  #
+  # 23800 has no oracle to complement, since a .pm would have to reproduce RAR's
+  # compressor. Without -g it is covered by selftest_vector_test() instead, so
+  # this is the stronger check on top rather than its only coverage.
+  #
+  #   12500 RAR3-hp   -> rar a -ma4 -hp<pw>       -> $RAR3$*0*  (header-encrypted)
+  #   23700 RAR3-p    -> rar a -ma4 -m0 -p<pw>    -> $RAR3$*1*  (stored)
+  #   23800 RAR3-p    -> rar a -ma4 -m3 -p<pw>    -> $RAR3$*1*  (compressed)
+  #   13000 RAR5      -> rar a -p<pw>             -> $rar5$
+  #
+  # RAR3 (-ma4) needs rar <= 6.x; rar 7.x dropped it. We prefer an -ma4-capable
+  # rar and fall back to whatever 'rar' is in PATH (RAR5 only).
+  #
+  # IMPORTANT: `apt install rar` gives rar 7.x, which can ONLY create RAR5 (no
+  # -ma switch), so 12500/23700/23800 cannot be produced that way. Fetch a
+  # legacy rar (<= 6.x) from RARLAB instead. It is a self-contained static
+  # binary, no install/root needed:
+  #
+  #   curl -O https://www.rarlab.com/rar/rarlinux-x64-612.tar.gz
+  #   mkdir -p "${HOME}/rar-old"
+  #   tar xzf rarlinux-x64-612.tar.gz -C "${HOME}/rar-old" --strip-components=1
+  #   # now ${HOME}/rar-old/rar supports -ma4 (RAR3). Override with RAR_BIN=... if elsewhere.
+  #
+  # rar2john (John the Ripper) extracts the hash; point RAR2JOHN=... at it if not
+  # at the default path below.
+  hashType=$1
+  attackType=$2
+
+  # RAR is a slow hash with a single kernel per mode; a0 suffices.
+  if [ "${attackType}" -eq 65535 ]; then
+    attackType=0
+  fi
+
+  # Prefer an -ma4-capable rar (RARLAB <= 6.x) so the RAR3 modes work.
+  local RAR_BIN="${RAR_BIN:-}"
+  if [ -z "${RAR_BIN}" ]; then
+    if [ -x "${HOME}/rar-old/rar" ]; then
+      RAR_BIN="${HOME}/rar-old/rar"
+    else
+      RAR_BIN=rar
+    fi
+  fi
+  local RAR2JOHN="${RAR2JOHN:-$(command -v rar2john 2>/dev/null || echo "${HOME}/john/run/rar2john")}"
+
+  if ! command -v "${RAR_BIN}" >/dev/null 2>&1 && [ ! -x "${RAR_BIN}" ]; then
+    record_skip "${hashType}" "rar not found. Fetch rarlinux-x64-612.tar.gz from rarlab.com (see rar_test() header; NOT 'apt install rar', that is rar 7.x = RAR5 only), or set RAR_BIN=/path/to/rar"
+    return
+  fi
+  if [ ! -x "${RAR2JOHN}" ] && ! command -v "${RAR2JOHN}" >/dev/null 2>&1; then
+    record_skip "${hashType}" "rar2john not found (set RAR2JOHN=/path/to/rar2john)"
+    return
+  fi
+
+  # Does this rar accept -ma4 (RAR3 archive format)?
+  local has_ma4=0
+  local probe; probe="$(mktemp -d)"
+  echo probe > "${probe}/p.txt"
+  if "${RAR_BIN}" a -ma4 -p_ -inul "${probe}/a.rar" "${probe}/p.txt" >/dev/null 2>&1 && [ -s "${probe}/a.rar" ]; then
+    has_ma4=1
+  fi
+  rm -rf "${probe}"
+
+  case ${hashType} in
+    12500|23700|23800)
+      if [ "${has_ma4}" -eq 0 ]; then
+        record_skip "${hashType}" "${RAR_BIN} cannot create RAR3 (-ma4), it is likely rar 7.x; fetch rarlinux-x64-612.tar.gz from rarlab.com (see rar_test() header) or set RAR_BIN=/path/to/rar<=6.x"
+        return
+      fi
+      ;;
+  esac
+
+  local password="hashcat"
+  local rdir="${OUTD}/rar_tests"   # generated per run, nothing checked in
+  local sdir="${rdir}/src"
+  mkdir -p "${sdir}"
+
+  # compressible payload (so -m3 actually compresses, exercising the compressed path)
+  yes "pattern the quick brown fox jumps over the lazy dog " 2>/dev/null | head -c 8000 > "${sdir}/payload.txt"
+
+  local arc="${rdir}/${hashType}.rar"
+  local sig='\$RAR3\$'
+  local label
+  rm -f "${arc}"
+
+  case ${hashType} in
+    12500) "${RAR_BIN}" a -ma4 -m3 -hp"${password}" -inul "${arc}" "${sdir}/payload.txt" >/dev/null 2>&1; label="rar3-hp" ;;
+    23700) "${RAR_BIN}" a -ma4 -m0 -p"${password}"  -inul "${arc}" "${sdir}/payload.txt" >/dev/null 2>&1; label="rar3-p-store" ;;
+    23800) "${RAR_BIN}" a -ma4 -m3 -p"${password}"  -inul "${arc}" "${sdir}/payload.txt" >/dev/null 2>&1; label="rar3-p-compressed" ;;
+    13000) "${RAR_BIN}" a       -p"${password}"     -inul "${arc}" "${sdir}/payload.txt" >/dev/null 2>&1; label="rar5"; sig='\$rar5\$' ;;
+    *) record_skip "${hashType}" "unsupported RAR mode for -g"; return ;;
+  esac
+
+  if [ ! -s "${arc}" ]; then
+    record_error "${hashType}" "rar failed to create ${arc}"
+    return
+  fi
+
+  local hashFile="${rdir}/${hashType}.hash"
+  "${RAR2JOHN}" "${arc}" 2>/dev/null | sed -E 's/^[^:]*://' | grep -oE "^${sig}[^:]+" | head -1 > "${hashFile}"
+
+  if [ ! -s "${hashFile}" ]; then
+    record_error "${hashType}" "rar2john produced no hash for ${arc}"
+    return
+  fi
+
+  build_container_cmd "${hashType}" "${attackType}" "${hashFile}" "${password}"
+
+  if [ -n "${CONTAINER_CMD}" ]; then
+    container_run_and_report "${CONTAINER_CMD}" "${hashType}" "${attackType}" "RAR-container ${label}"
+  fi
+}
+
+function sevenzip_test()
+{
+  # Real-archive test for the 7z family: 11600 from a 7-Zip archive and 13600
+  # from a zip whose entries use WinZip AES. Both are built with the 7z binary
+  # and read back with John's extractors.
+  #
+  # 11600 is generated four ways, because the mode's work does not end at the
+  # KDF: after deriving the key it decrypts and decompresses a block and checks
+  # a CRC, so the codec is part of what is under test. Header encryption on and
+  # off change the hash type (0 and 2) as well.
+  hashType=$1
+  attackType=$2
+
+  # both are slow hashes with one kernel each, so a0 suffices
+  if [ "${attackType}" -eq 65535 ]; then
+    attackType=0
+  fi
+
+  local SEVENZIP_BIN="${SEVENZIP_BIN:-7z}"
+  local SEVENZIP2JOHN="${SEVENZIP2JOHN:-$(command -v 7z2john.pl 2>/dev/null || echo "${HOME}/john/run/7z2john.pl")}"
+  local ZIP2JOHN="${ZIP2JOHN:-$(command -v zip2john 2>/dev/null || echo "${HOME}/john/run/zip2john")}"
+
+  if ! command -v "${SEVENZIP_BIN}" >/dev/null 2>&1; then
+    record_skip "${hashType}" "7z not found (apt install p7zip-full, or set SEVENZIP_BIN=/path/to/7z)"
+    return
+  fi
+
+  local password="hashcat"
+  local sdir="${OUTD}/7z_tests"
+
+  mkdir -p "${sdir}"
+
+  # compressible and large enough that the codecs have something to do
+  yes "pattern the quick brown fox jumps over the lazy dog " 2>/dev/null | head -c 8000 > "${sdir}/payload.txt"
+
+  local variants
+
+  case ${hashType} in
+    11600)
+      if [ ! -x "${SEVENZIP2JOHN}" ] && ! command -v "${SEVENZIP2JOHN}" >/dev/null 2>&1; then
+        record_skip "${hashType}" "7z2john.pl not found (set SEVENZIP2JOHN=/path/to/7z2john.pl)"
+        return
+      fi
+
+      if ! perl -MCompress::Raw::Lzma -e 1 >/dev/null 2>&1; then
+        record_skip "${hashType}" "7z2john.pl needs Compress::Raw::Lzma (apt install libcompress-raw-lzma-perl)"
+        return
+      fi
+
+      # label|7z options
+      variants="lzma2-header-encrypted|-mhe=on lzma2-header-plain|-mhe=off stored|-mhe=on:-m0=Copy bzip2|-mhe=on:-m0=BZip2"
+      ;;
+    13600)
+      if [ ! -x "${ZIP2JOHN}" ] && ! command -v "${ZIP2JOHN}" >/dev/null 2>&1; then
+        record_skip "${hashType}" "zip2john not found (set ZIP2JOHN=/path/to/zip2john)"
+        return
+      fi
+
+      variants="aes128|-mem=AES128 aes256|-mem=AES256"
+      ;;
+    *)
+      record_skip "${hashType}" "unsupported 7z mode for -g"
+      return
+      ;;
+  esac
+
+  local variant
+
+  for variant in ${variants}; do
+    local label="${variant%%|*}"
+    local opts="${variant##*|}"
+
+    # options are colon-separated so one variant stays one word above
+    opts="${opts//:/ }"
+
+    local archive="${sdir}/${hashType}_${label}"
+    local hashFile="${sdir}/${hashType}_${label}.hash"
+
+    rm -f "${archive}".7z "${archive}".zip
+
+    if [ "${hashType}" -eq 13600 ]; then
+      archive="${archive}.zip"
+
+      "${SEVENZIP_BIN}" a -tzip ${opts} -p"${password}" "${archive}" "${sdir}/payload.txt" >/dev/null 2>&1
+
+      "${ZIP2JOHN}" "${archive}" 2>/dev/null | grep -oE '^[^:]*:\$zip2\$[^:]*' | sed -E 's/^[^:]*://' | head -1 > "${hashFile}"
+    else
+      archive="${archive}.7z"
+
+      "${SEVENZIP_BIN}" a ${opts} -p"${password}" "${archive}" "${sdir}/payload.txt" >/dev/null 2>&1
+
+      perl "${SEVENZIP2JOHN}" "${archive}" 2>/dev/null | grep -oE '\$7z\$[^:]*' | head -1 > "${hashFile}"
+    fi
+
+    if [ ! -s "${hashFile}" ]; then
+      record_error "${hashType}" "could not read a hash out of the generated ${label} archive"
+      continue
+    fi
+
+    build_container_cmd "${hashType}" "${attackType}" "${hashFile}" "${password}"
+
+    if [ -n "${CONTAINER_CMD}" ]; then
+      container_run_and_report "${CONTAINER_CMD}" "${hashType}" "${attackType}" "7z-container ${label}"
+    fi
+  done
+}
+
+function pdf_gen_test()
+{
+  # Real-document test for the PDF modes, built with qpdf and read back with
+  # John's pdf2john.pl. qpdf 11 refuses RC4 unless it is told the caller knows,
+  # hence --allow-weak-crypto on the two RC4 variants.
+  hashType=$1
+  attackType=$2
+
+  if [ "${attackType}" -eq 65535 ]; then
+    attackType=0
+  fi
+
+  local QPDF_BIN="${QPDF_BIN:-qpdf}"
+  local PDF2JOHN="${PDF2JOHN:-$(command -v pdf2john.pl 2>/dev/null || echo "${HOME}/john/run/pdf2john.pl")}"
+
+  if ! command -v "${QPDF_BIN}" >/dev/null 2>&1; then
+    record_skip "${hashType}" "qpdf not found (apt install qpdf, or set QPDF_BIN=/path/to/qpdf)"
+    return
+  fi
+
+  if [ ! -x "${PDF2JOHN}" ] && ! command -v "${PDF2JOHN}" >/dev/null 2>&1; then
+    record_skip "${hashType}" "pdf2john.pl not found (set PDF2JOHN=/path/to/pdf2john.pl); the .py needs pyhanko and is not used here"
+    return
+  fi
+
+  local password="hashcat"
+  local pdir="${OUTD}/pdf_gen_tests"
+
+  mkdir -p "${pdir}"
+
+  # qpdf encrypts an existing document rather than making one, so there has to
+  # be a document. Ghostscript writes the smallest valid one.
+  local plain="${pdir}/plain.pdf"
+
+  if [ ! -s "${plain}" ]; then
+    if command -v gs >/dev/null 2>&1; then
+      gs -q -o "${plain}" -sDEVICE=pdfwrite -c "showpage" >/dev/null 2>&1
+    fi
+  fi
+
+  if [ ! -s "${plain}" ]; then
+    record_skip "${hashType}" "no gs to write a plain PDF for qpdf to encrypt (apt install ghostscript)"
+    return
+  fi
+
+  local variants
+
+  case ${hashType} in
+    10400) variants="rc4-40|--allow-weak-crypto:--encrypt:PW:PW:40:--" ;;
+    10500) variants="rc4-128|--allow-weak-crypto:--encrypt:PW:PW:128:-- aes-128|--encrypt:PW:PW:128:--use-aes=y:--" ;;
+    10700) variants="aes-256|--encrypt:PW:PW:256:--" ;;
+    *)
+      record_skip "${hashType}" "unsupported PDF mode for -g"
+      return
+      ;;
+  esac
+
+  local variant
+
+  for variant in ${variants}; do
+    local label="${variant%%|*}"
+    local opts="${variant##*|}"
+
+    opts="${opts//:/ }"
+    opts="${opts//PW/${password}}"
+
+    local doc="${pdir}/${hashType}_${label}.pdf"
+    local hashFile="${pdir}/${hashType}_${label}.hash"
+
+    rm -f "${doc}"
+
+    "${QPDF_BIN}" ${opts} "${plain}" "${doc}" >/dev/null 2>&1
+
+    if [ ! -s "${doc}" ]; then
+      record_skip "${hashType}" "qpdf could not write a ${label} document"
+      continue
+    fi
+
+    perl "${PDF2JOHN}" "${doc}" 2>/dev/null | grep -oE '\$pdf\$[^:]*' | head -1 > "${hashFile}"
+
+    if [ ! -s "${hashFile}" ]; then
+      record_error "${hashType}" "pdf2john produced no hash for the ${label} document"
+      continue
+    fi
+
+    build_container_cmd "${hashType}" "${attackType}" "${hashFile}" "${password}"
+
+    if [ -n "${CONTAINER_CMD}" ]; then
+      container_run_and_report "${CONTAINER_CMD}" "${hashType}" "${attackType}" "PDF-container ${label}"
+    fi
+  done
+}
+
+function ssh_test()
+{
+  # Real-key test for 22931, built with ssh-keygen and read back with John's
+  # ssh2john.py.
+  #
+  # -m PEM is what makes this work: it writes the classic PEM form with a
+  # DEK-Info header, which is the only OpenSSH key layout hashcat's 229xx modes
+  # parse. Without it ssh-keygen writes openssh-key-v1, whose bcrypt-pbkdf KDF
+  # no released hashcat mode reads.
+  hashType=$1
+  attackType=$2
+
+  if [ "${attackType}" -eq 65535 ]; then
+    attackType=0
+  fi
+
+  local SSHKEYGEN_BIN="${SSHKEYGEN_BIN:-ssh-keygen}"
+  local SSH2JOHN="${SSH2JOHN:-$(command -v ssh2john.py 2>/dev/null || echo "${HOME}/john/run/ssh2john.py")}"
+
+  if ! command -v "${SSHKEYGEN_BIN}" >/dev/null 2>&1; then
+    record_skip "${hashType}" "ssh-keygen not found (set SSHKEYGEN_BIN=/path/to/ssh-keygen)"
+    return
+  fi
+
+  if [ ! -f "${SSH2JOHN}" ] && ! command -v "${SSH2JOHN}" >/dev/null 2>&1; then
+    record_skip "${hashType}" "ssh2john.py not found (set SSH2JOHN=/path/to/ssh2john.py)"
+    return
+  fi
+
+  local password="hashcat"
+  local kdir="${OUTD}/ssh_tests"
+
+  mkdir -p "${kdir}"
+
+  local keytype
+
+  for keytype in rsa dsa; do
+    local key="${kdir}/${hashType}_${keytype}"
+    local hashFile="${kdir}/${hashType}_${keytype}.hash"
+
+    rm -f "${key}" "${key}.pub"
+
+    "${SSHKEYGEN_BIN}" -q -m PEM -t "${keytype}" -N "${password}" -C hashcat -f "${key}" >/dev/null 2>&1
+
+    if [ ! -s "${key}" ]; then
+      record_skip "${hashType}" "ssh-keygen would not write a PEM ${keytype} key"
+      continue
+    fi
+
+    python3 "${SSH2JOHN}" "${key}" 2>/dev/null | grep -oE '\$sshng\$[^:]*' | head -1 > "${hashFile}"
+
+    if [ ! -s "${hashFile}" ]; then
+      record_error "${hashType}" "ssh2john produced no hash for the ${keytype} key"
+      continue
+    fi
+
+    build_container_cmd "${hashType}" "${attackType}" "${hashFile}" "${password}"
+
+    if [ -n "${CONTAINER_CMD}" ]; then
+      container_run_and_report "${CONTAINER_CMD}" "${hashType}" "${attackType}" "SSH-key ${keytype}"
+    fi
+  done
+}
+
+function selftest_vector_read()
+{
+  # Read a mode's self-test vector out of hashcat itself into the globals
+  # ST_VECTOR_HASH, ST_VECTOR_PASS, ST_VECTOR_FORMAT and ST_VECTOR_DEPRECATED.
+  #
+  # Every module ships an ST_HASH and ST_PASS pair for the startup self test,
+  # and --hash-info publishes it. --machine-readable is the one that can be
+  # trusted here: the human-readable Example.Hash line is truncated past 200
+  # characters, which most container and archive hashes exceed.
+  #
+  # The JSON has a fixed key order, so anchoring each value on the key that
+  # follows it keeps the match correct for hashes that contain almost anything,
+  # including the '*' and ':' separators most of them use.
+  #
+  # $1 = hashType. Returns non-zero when the mode has no usable vector.
+  local sv_hashType="$1"
+  local info
+
+  ST_VECTOR_HASH=""
+  ST_VECTOR_PASS=""
+  ST_VECTOR_FORMAT=""
+  ST_VECTOR_DEPRECATED=0
+
+  info=$(./${BIN} -m "${sv_hashType}" --hash-info --machine-readable 2>/dev/null)
+
+  if [ -z "${info}" ]; then
+    return 1
+  fi
+
+  ST_VECTOR_HASH=$(printf '%s' "${info}"   | sed -n 's/.*"example_hash": "\(.*\)", "example_pass".*/\1/p')
+  ST_VECTOR_PASS=$(printf '%s' "${info}"   | sed -n 's/.*"example_pass": "\(.*\)", "benchmark_mask".*/\1/p')
+  ST_VECTOR_FORMAT=$(printf '%s' "${info}" | sed -n 's/.*"example_hash_format": "\([^"]*\)".*/\1/p')
+
+  # json_encode() escapes backslashes and double quotes, so undo that
+  ST_VECTOR_HASH=$(printf '%s' "${ST_VECTOR_HASH}" | sed -e 's/\\"/"/g' -e 's/\\\\/\\/g')
+
+  if printf '%s' "${info}" | grep -q '"is_deprecated": true'; then
+    ST_VECTOR_DEPRECATED=1
+  fi
+
+  if [ -z "${ST_VECTOR_HASH}" ] || [ -z "${ST_VECTOR_PASS}" ]; then
+    return 1
+  fi
+
+  return 0
+}
+
+function selftest_vector_test()
+{
+  # Crack a mode's own self-test vector. No oracle and nothing checked in: the
+  # hash and the password both come out of the binary under test, and the crack
+  # is a normal run through the normal kernels, so this is an end to end test
+  # rather than the parser check the startup self test performs.
+  #
+  # $1 = hashType, $2 = attackType
+  hashType=$1
+  attackType=$2
+
+  # one vector and one candidate, so attack mode 0 covers it
+  if [ "${attackType}" -eq 65535 ]; then
+    attackType=0
+  fi
+
+  if ! selftest_vector_read "${hashType}"; then
+    record_skip "${hashType}" "no self-test vector published by --hash-info"
+    return
+  fi
+
+  local hashFile="${OUTD}/${hashType}_selftest.hash"
+
+  case "${ST_VECTOR_FORMAT}" in
+    *"binary file only"*)
+      # the module reads its hash file as raw bytes, and --hash-info hands the
+      # vector over hex encoded. printf '%b' keeps this to shell builtins, so
+      # no xxd or od dependency creeps into the default test path.
+      printf '%b' "$(printf '%s' "${ST_VECTOR_HASH}" | sed 's/\(..\)/\\x\1/g')" > "${hashFile}"
+      ;;
+    "N/A")
+      record_skip "${hashType}" "mode has no example hash to crack"
+      return
+      ;;
+    *)
+      # "plain" and "hex-encoded" are both already the literal hash line: the
+      # format names the convention the line itself uses, not the encoding
+      # --hash-info applied to it
+      printf '%s\n' "${ST_VECTOR_HASH}" > "${hashFile}"
+      ;;
+  esac
+
+  if [ ! -s "${hashFile}" ]; then
+    record_error "${hashType}" "could not write the self-test vector to ${hashFile}"
+    return
+  fi
+
+  build_container_cmd "${hashType}" "${attackType}" "${hashFile}" "${ST_VECTOR_PASS}"
+
+  if [ -z "${CONTAINER_CMD}" ]; then
+    return
+  fi
+
+  if [ "${ST_VECTOR_DEPRECATED}" -eq 1 ]; then
+    CONTAINER_CMD="${CONTAINER_CMD} --deprecated-check-disable"
+  fi
+
+  # the startup self test would re-derive the same vector on every launch, so
+  # skip it and let the run itself be the test
+  CONTAINER_CMD="${CONTAINER_CMD} --self-test-disable"
+
+  container_run_and_report "${CONTAINER_CMD}" "${hashType}" "${attackType}" "self-test vector"
+}
+
+function selftest_vector_sweep()
+{
+  # -S: run selftest_vector_test() over every hash-mode hashcat knows, or over
+  # the range -m selected, and print one line per mode that did not crack its
+  # own example hash. This is the cheapest possible coverage check: it needs no
+  # oracle, no container, and no external tool, so it reaches the modes the
+  # rest of the suite cannot.
+  local sweep_total=0
+  local sweep_ok=0
+  local sweep_bad=""
+  local sweep_slow=""
+  local sweep_modes
+  local sweep_mode
+
+  sweep_modes=$(./${BIN} --hash-info 2>/dev/null | sed -n 's/^Hash mode #\([0-9]*\)$/\1/p')
+
+  if [ -z "${sweep_modes}" ]; then
+    echo "! could not read the hash-mode list from ./${BIN} --hash-info"
+    return 1
+  fi
+
+  echo "[ ${OUTD} ] > Cracking every hash-mode's own self-test vector"
+
+  for sweep_mode in ${sweep_modes}; do
+
+    if [ "${HT}" -ne 65535 ]; then
+      if [ "${sweep_mode}" -lt "${HT_MIN}" ] || [ "${sweep_mode}" -gt "${HT_MAX}" ]; then
+        continue
+      fi
+    fi
+
+    sweep_total=$((sweep_total + 1))
+
+    local before="${SKIPPED_LIST}"
+    local out
+
+    out=$(selftest_vector_test "${sweep_mode}" 0)
+
+    echo "${out}"
+
+    if echo "${out}" | grep -q '> OK :'; then
+      sweep_ok=$((sweep_ok + 1))
+    elif echo "${out}" | grep -q '> Warning :'; then
+      # hit --runtime before it could finish, which says nothing about the mode
+      sweep_slow="${sweep_slow}${sweep_mode} "
+    elif [ "${SKIPPED_LIST}" = "${before}" ]; then
+      sweep_bad="${sweep_bad}${sweep_mode} "
+    fi
+
+  done
+
+  echo ""
+  echo "[ ${OUTD} ] > ${sweep_ok}/${sweep_total} hash-modes cracked their own self-test vector"
+
+  if [ -n "${sweep_slow}" ]; then
+    echo "[ ${OUTD} ] > hit --runtime ${RUNTIME}, rerun those with -r: ${sweep_slow}"
+  fi
+
+  if [ -n "${sweep_bad}" ]; then
+    echo "[ ${OUTD} ] > did not crack: ${sweep_bad}"
+  fi
+
+  print_skip_summary
+
+  if [ -n "${sweep_bad}" ]; then
+    return 1
+  fi
+
+  return 0
+}
+
 function usage()
 {
 cat << EOF
@@ -4280,7 +5657,29 @@ OPTIONS:
   -I    Use this folder as input/output folder for packaged tests
         (string)    => path to folder
 
-  -g    Generate crypto-containers on-the-fly (requires sudo)
+  -g    Generate crypto-containers on-the-fly and test those as well as the
+        normal test.pl oracles, never instead of them. GPG (gpg1/gpg2), PKZIP
+        (zip), RAR (a RARLAB rar 6.x or older, see rar_test), 7-Zip and WinZip
+        AES (7z), PDF (qpdf and ghostscript), OpenSSH keys (ssh-keygen) and
+        VeraCrypt (the veracrypt console build, 1.25.9 or older via
+        VERACRYPT_BIN if the RIPEMD-160 modes matter) need no privileges;
+        LUKS1, LUKS2 and TrueCrypt (tcplay, driven through expect) need sudo,
+        for device-mapper and for a loop device. Anything that cannot run for
+        want of a tool is reported again in a summary at the end.
+        Runs only the modes it can build a container for: on its own it runs
+        all of them, with -m it runs the ones you selected, and a -m that
+        selects none of them is an error that lists the ones it has.
+        tools/README.md lists which tool each format needs, where to get it,
+        and what is skipped without it. Note that the 2john tools come from
+        John jumbo, not from the john package, and that gpg1 is gnupg1.
+
+  -S    Crack every hash-mode's own self-test vector and report which modes
+        cannot. The hash and the password both come from --hash-info, so this
+        needs no oracle, no container and no external tool, and reaches modes
+        the rest of the suite cannot. Runs on its own instead of the normal
+        suite; -m limits it to one mode or a range. Each run is one candidate
+        against one hash, so -r defaults to 60 here rather than 400; modes that
+        hit it are reported separately from modes that failed.
 
   -h    Show this help
 
@@ -4297,11 +5696,15 @@ DEVICE_TYPE="null"
 KERNEL_TYPE="Optimized"
 VECTOR="default"
 HT=0
+HT_GIVEN=0
 PACKAGE=0
 OPTIMIZED=1
 GENERATE_CONTAINERS=0
+SELFTEST_ALL=0
+RUNTIME_SET=0
+HT_SET=0
 
-while getopts "V:t:m:a:b:hcpd:x:o:d:D:F:POI:s:fr:g" opt; do
+while getopts "V:t:m:a:b:hcpd:x:o:d:D:F:POI:s:fr:gS" opt; do
 
   case ${opt} in
     "V")
@@ -4335,11 +5738,14 @@ while getopts "V:t:m:a:b:hcpd:x:o:d:D:F:POI:s:fr:g" opt; do
       ;;
 
     "m")
+      HT_GIVEN=1
+
       if [ "${OPTARG}" = "all" ]; then
         HT=65535
       else
         HT=${OPTARG}
       fi
+      HT_SET=1
       ;;
 
     "a")
@@ -4437,6 +5843,11 @@ while getopts "V:t:m:a:b:hcpd:x:o:d:D:F:POI:s:fr:g" opt; do
 
     "r")
       RUNTIME=${OPTARG}
+      RUNTIME_SET=1
+      ;;
+
+    "S")
+      SELFTEST_ALL=1
       ;;
 
     "g")
@@ -4453,6 +5864,33 @@ while getopts "V:t:m:a:b:hcpd:x:o:d:D:F:POI:s:fr:g" opt; do
   esac
 
 done
+
+# test.sh is not a thing to run under sudo. Where a generator needs root it asks
+# for it per command, and only for that command. Running the whole script as root
+# instead moves HOME, which hides the perl modules install_modules.sh put in the
+# calling user's ${HOME}/.perl5, and test.pl then fails to load a module for every
+# mode. That surfaces as "Error : 0/0 not found" on all of them, which reads as
+# hashcat being broken rather than as a setup mistake, so it is worth stopping for.
+
+if [ -n "${SUDO_USER:-}" ]; then
+  echo "! Do not run test.sh through sudo."
+  echo "!"
+  echo "! Where it needs root it asks per command, for that command only. As root the"
+  echo "! whole run loses ${SUDO_USER}'s perl modules, and every mode then reports 0/0"
+  echo "! rather than saying what is wrong."
+  echo "!"
+  echo "! Run it as ${SUDO_USER} and let it ask."
+
+  exit 1
+fi
+
+# -g on its own means everything -g can build, not the default of -m 0. Mode 0
+# has no generator, so without this the run starts, finds nothing to generate
+# and reports an error for a run nobody asked for.
+
+if [[ "${GENERATE_CONTAINERS}" -eq 1 ]] && [ "${HT_GIVEN}" -eq 0 ]; then
+  HT=65535
+fi
 
 # handle Apple Silicon
 
@@ -4476,6 +5914,15 @@ if [ "${OPTIMIZED}" -eq 1 ]; then
 fi
 
 # set max-runtime
+#
+# -S runs every hash-mode in one go, and each run is a single candidate against
+# a single hash, so the normal ceiling only ever applies to a mode that is not
+# going to finish anyway. Cap it much lower by default and report anything that
+# hits the cap as a timeout rather than a failure. -r still wins.
+
+if [ "${SELFTEST_ALL}" -eq 1 ] && [ "${RUNTIME_SET}" -eq 0 ]; then
+  RUNTIME=60
+fi
 
 OPTS="${OPTS} --runtime ${RUNTIME}"
 
@@ -4539,6 +5986,25 @@ if [ "${PACKAGE}" -eq 0 ] || [ -z "${PACKAGE_FOLDER}" ]; then
 
   HT=${HT_MIN}
 
+  # -S runs on its own: it walks every hash-mode hashcat reports rather than
+  # HASH_TYPES, since the whole point is to reach the modes that have no oracle
+  # and no container, so it has to come before the HASH_TYPES filter below.
+  if [ "${SELFTEST_ALL}" -eq 1 ]; then
+    mkdir -p "${OUTD}"
+
+    # -m defaults to 0, which would quietly sweep exactly one mode
+    if [ "${HT_SET}" -eq 0 ]; then
+      HT=65535
+    fi
+
+    selftest_vector_sweep
+    selftest_rc=$?
+
+    echo "[ ${OUTD} ] > full log: ${OUTD}/logfull.txt"
+
+    exit ${selftest_rc}
+  fi
+
   # filter by hash_type
   if [ "${HT}" -ne 65535 ]; then
 
@@ -4555,13 +6021,83 @@ if [ "${PACKAGE}" -eq 0 ] || [ -z "${PACKAGE_FOLDER}" ]; then
     fi
   fi
 
+  # -g only has a generator for some of the modes. Selecting none of them is
+  # worth stopping for rather than working around: the run would walk the whole
+  # list, build nothing and finish clean, which reads exactly like a pass.
 
   if [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
-    if sudo -n true 2>/dev/null; then
-      true
+    gen_selected=0
+
+    if [ "${HT}" -eq 65535 ]; then
+      gen_selected=1
     else
-      echo "We'll need sudo to generate crypto-containers on-the-fly"
+      for _gen_mode in ${GEN_MODES}; do
+        if [ "${_gen_mode}" -ge "${HT_MIN}" ] && [ "${_gen_mode}" -le "${HT_MAX}" ]; then
+          gen_selected=1
+          break
+        fi
+      done
     fi
+
+    if [ "${gen_selected}" -eq 0 ]; then
+      if [ "${HT_MIN}" -eq "${HT_MAX}" ]; then
+        echo "! -g has no generator for -m ${HT_MIN}"
+      else
+        echo "! -g has no generator for any mode in -m ${HT_MIN}-${HT_MAX}"
+      fi
+
+      echo "! -g can build: $(echo ${GEN_MODES} | tr ' ' '\n' | sort -n | tr '\n' ' ')"
+
+      exit 1
+    fi
+  fi
+
+
+  # Ask for a password only when one of the selected generators actually needs
+  # one, rather than on every -g run. GEN_SUDO_MODES says which those are.
+
+  needs_sudo=0
+
+  if [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+    for _sudo_mode in ${GEN_SUDO_MODES}; do
+      if [ "${HT}" -eq 65535 ]; then
+        needs_sudo=1
+        break
+      elif [ "${_sudo_mode}" -ge "${HT_MIN}" ] && [ "${_sudo_mode}" -le "${HT_MAX}" ]; then
+        needs_sudo=1
+        break
+      fi
+    done
+  fi
+
+  if [ "${needs_sudo}" -eq 1 ]; then
+
+    # Ask at the start rather than when the first generator reaches its first sudo
+    # call. A full run is long, and a password prompt an hour in, once nobody is
+    # watching any more, stalls the run until somebody notices.
+
+    if ! sudo -n true 2>/dev/null; then
+      echo "> Some of the selected modes build their container as root, so this run needs"
+      echo "  sudo. Asking now, rather than stopping for it later."
+
+      if ! sudo -v; then
+        echo "! No root, so those modes cannot be generated. Deselect them, or run without -g."
+
+        exit 1
+      fi
+    fi
+
+    # sudo forgets after a few minutes, 15 by default, and a run outlasts that many
+    # times over. Refresh in the background so the prompt does not come back partway
+    # through, and stop when this shell does. The kill -0 is the belt to the trap's
+    # braces: if the script is killed outright the trap never runs, and the loop
+    # ends on its own once its parent is gone.
+
+    ( while kill -0 $$ 2>/dev/null; do sudo -n true 2>/dev/null; sleep 60; done ) &
+
+    SUDO_KEEPALIVE_PID=$!
+
+    trap 'kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null' EXIT
   fi
 
   if [ -z "${PACKAGE_FOLDER}" ]; then
@@ -4569,18 +6105,32 @@ if [ "${PACKAGE}" -eq 0 ] || [ -z "${PACKAGE_FOLDER}" ]; then
     # make new dir
     mkdir -p "${OUTD}"
 
+    # with -g the container tests read the volumes this run builds rather than
+    # the ones in the tree or the ones fetched from hashcat.net
+    if [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+      TC_TESTS_DIR="$(container_gen_dir tc_tests_gen)"
+      VC_TESTS_DIR="$(container_gen_dir vc_tests_gen)"
+      LUKS_TESTS_DIR="$(container_gen_dir luks_tests_gen)"
+    fi
+
     # generate random test entry
     if [ "${HT}" -eq 65535 ]; then
       for TMP_HT in ${HASH_TYPES}; do
 
-        if ! ( is_in_array "${TMP_HT}" ${LUKS1_ALL_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 0 ]] ); then
-          if ! ( is_in_array "${TMP_HT}" ${LUKS2_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 0 ]] ); then
-            if ! is_in_array "${TMP_HT}" ${TC_MODES}; then
-              if ! is_in_array "${TMP_HT}" ${VC_MODES}; then
-                if ! is_in_array "${TMP_HT}" ${CL_MODES}; then
-                  perl tools/test.pl single "${TMP_HT}" >> "${OUTD}/all.sh"
-                fi
-              fi
+        # -g runs only the modes it can build, so only those need a hash line
+        # generated for them here.
+        if [[ "${GENERATE_CONTAINERS}" -eq 1 ]] && ! is_in_array "${TMP_HT}" ${GEN_MODES}; then
+          continue
+        fi
+
+        # only a mode with a .pm has anything for test.pl to generate. That
+        # already excludes the TrueCrypt, VeraCrypt and CryptoLoop modes, which
+        # are container-only. LUKS is the one family that has both, and it uses
+        # its .pm only when -g asks for containers to be generated.
+        if is_in_array "${TMP_HT}" ${PM_MODES}; then
+          if ! ( is_in_array "${TMP_HT}" ${LUKS1_ALL_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 0 ]] ); then
+            if ! ( is_in_array "${TMP_HT}" ${LUKS2_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 0 ]] ); then
+              perl tools/test.pl single "${TMP_HT}" >> "${OUTD}/all.sh"
             fi
           fi
         fi
@@ -4592,14 +6142,20 @@ if [ "${PACKAGE}" -eq 0 ] || [ -z "${PACKAGE_FOLDER}" ]; then
           continue
         fi
 
-        if ! ( is_in_array "${TMP_HT}" ${LUKS1_ALL_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 0 ]] ); then
-          if ! ( is_in_array "${TMP_HT}" ${LUKS2_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 0 ]] ); then
-            if ! is_in_array "${TMP_HT}" ${TC_MODES}; then
-              if ! is_in_array "${TMP_HT}" ${VC_MODES}; then
-                if ! is_in_array "${TMP_HT}" ${CL_MODES}; then
-                  perl tools/test.pl single "${TMP_HT}" >> "${OUTD}/all.sh"
-                fi
-              fi
+        # -g runs only the modes it can build, so only those need a hash line
+        # generated for them here.
+        if [[ "${GENERATE_CONTAINERS}" -eq 1 ]] && ! is_in_array "${TMP_HT}" ${GEN_MODES}; then
+          continue
+        fi
+
+        # only a mode with a .pm has anything for test.pl to generate. That
+        # already excludes the TrueCrypt, VeraCrypt and CryptoLoop modes, which
+        # are container-only. LUKS is the one family that has both, and it uses
+        # its .pm only when -g asks for containers to be generated.
+        if is_in_array "${TMP_HT}" ${PM_MODES}; then
+          if ! ( is_in_array "${TMP_HT}" ${LUKS1_ALL_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 0 ]] ); then
+            if ! ( is_in_array "${TMP_HT}" ${LUKS2_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 0 ]] ); then
+              perl tools/test.pl single "${TMP_HT}" >> "${OUTD}/all.sh"
             fi
           fi
         fi
@@ -4634,6 +6190,14 @@ if [ "${PACKAGE}" -eq 0 ] || [ -z "${PACKAGE_FOLDER}" ]; then
         # we are done because hash_type is larger than range:
         break
       fi
+    fi
+
+    # -g runs the modes it can build a container for and nothing else. Asking
+    # for generated coverage is not also a request to re-run the oracle suite
+    # for the six hundred modes that have no generator.
+
+    if [[ "${GENERATE_CONTAINERS}" -eq 1 ]] && ! is_in_array "${hash_type}" ${GEN_MODES}; then
+      continue
     fi
 
     if [ "${hash_type}" -eq 20510 ]; then # special case for PKZIP Master Key
@@ -4757,8 +6321,55 @@ if [ "${PACKAGE}" -eq 0 ] || [ -z "${PACKAGE_FOLDER}" ]; then
               # run luks2 tests
               luks2_test "${hash_type}" ${ATTACK}
             else
-              # run attack mode 0 (stdin)
-              if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 0 ]; then attack_0; fi
+              # -g adds a real-container run, it does not take the place of the
+              # test.pl oracle. A run with -g has to cover at least what a run
+              # without it covers, otherwise asking for more coverage quietly
+              # removes some.
+              if is_in_array "${hash_type}" ${GPG_GEN_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+                # generate + test real GPG secret-key containers
+                gpg_test "${hash_type}" ${ATTACK}
+              fi
+
+              if is_in_array "${hash_type}" ${RAR_GEN_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+                # generate + test real RAR archives
+                rar_test "${hash_type}" ${ATTACK}
+              fi
+
+              if is_in_array "${hash_type}" ${SEVENZIP_GEN_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+                # generate + test real 7-Zip and WinZip AES archives
+                sevenzip_test "${hash_type}" ${ATTACK}
+              fi
+
+              if is_in_array "${hash_type}" ${PDF_GEN_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+                # generate + test real encrypted PDFs
+                pdf_gen_test "${hash_type}" ${ATTACK}
+              fi
+
+              if is_in_array "${hash_type}" ${SSH_GEN_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+                # generate + test a real OpenSSH private key
+                ssh_test "${hash_type}" ${ATTACK}
+              fi
+
+              # the module's own self-test vector, in every run
+              if is_in_array "${hash_type}" ${SELFTEST_MODES}; then
+                selftest_vector_test "${hash_type}" ${ATTACK}
+              fi
+
+              if is_in_array "${hash_type}" ${LUKS1_ALL_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+                # generate + test real LUKS1 containers. 14600 is the legacy
+                # format, which reads a whole container rather than an extracted
+                # hash and has no generator here.
+                if [ ${hash_type} -eq 14600 ]; then
+                  record_skip "${hash_type}" "the legacy LUKS format is not generated, so -m 14600 stays on the containers fetched from hashcat.net"
+                else
+                  luks_test "${hash_type}" ${ATTACK}
+                fi
+              fi
+
+              if is_in_array "${hash_type}" ${PM_MODES}; then
+                # run attack mode 0 (stdin)
+                if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 0 ]; then attack_0; fi
+              fi
             fi
 
           else
@@ -4769,23 +6380,47 @@ if [ "${PACKAGE}" -eq 0 ] || [ -z "${PACKAGE_FOLDER}" ]; then
               cryptoloop_test "${hash_type}" 192
               cryptoloop_test "${hash_type}" 256
             else
-              # run attack mode 0 (stdin)
-              if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 0 ]; then attack_0; fi
+              # as in the slow-hash branch above, -g is an addition to the
+              # test.pl oracle rather than a replacement for it
+              if is_in_array "${hash_type}" ${PKZIP_GEN_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+                # generate + test real PKZIP/ZipCrypto containers
+                pkzip_test "${hash_type}" ${ATTACK}
+              fi
 
-              # run attack mode 1 (combinator)
-              if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 1 ]; then attack_1; fi
+              if is_in_array "${hash_type}" ${SEVENZIP_GEN_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+                # generate + test real 7-Zip and WinZip AES archives
+                sevenzip_test "${hash_type}" ${ATTACK}
+              fi
 
-              # run attack mode 3 (bruteforce)
-              if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 3 ]; then attack_3; fi
+              if is_in_array "${hash_type}" ${PDF_GEN_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+                # generate + test real encrypted PDFs
+                pdf_gen_test "${hash_type}" ${ATTACK}
+              fi
 
-              # run attack mode 6 (dict+mask)
-              if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 6 ]; then attack_6; fi
+              if is_in_array "${hash_type}" ${SSH_GEN_MODES} && [[ "${GENERATE_CONTAINERS}" -eq 1 ]]; then
+                # generate + test a real OpenSSH private key
+                ssh_test "${hash_type}" ${ATTACK}
+              fi
 
-              # run attack mode 7 (mask+dict)
-              if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 7 ]; then attack_7; fi
+              if is_in_array "${hash_type}" ${PM_MODES}; then
+                # run attack mode 0 (stdin)
+                if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 0 ]; then attack_0; fi
 
-              # run attack mode 12 (mask says where the dict word goes)
-              if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 12 ]; then attack_12; fi
+                # run attack mode 1 (combinator)
+                if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 1 ]; then attack_1; fi
+
+                # run attack mode 3 (bruteforce)
+                if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 3 ]; then attack_3; fi
+
+                # run attack mode 6 (dict+mask)
+                if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 6 ]; then attack_6; fi
+
+                # run attack mode 7 (mask+dict)
+                if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 7 ]; then attack_7; fi
+
+                # run attack mode 12 (mask says where the dict word goes)
+                if [ ${ATTACK} -eq 65535 ] || [ ${ATTACK} -eq 12 ]; then attack_12; fi
+              fi
             fi
 
           fi
@@ -4796,6 +6431,8 @@ if [ "${PACKAGE}" -eq 0 ] || [ -z "${PACKAGE_FOLDER}" ]; then
       MODE=${MODE_OLD}
     fi
   done
+
+  print_skip_summary
 
 else
 
@@ -4846,7 +6483,7 @@ if [ "${PACKAGE}" -eq 1 ]; then
 
   if [ "${copy_luks_dir}" -eq 1 ]; then
     mkdir "${OUTD}/luks_tests/"
-    cp ${TDIR}/luks_tests/* "${OUTD}/luks_tests/"
+    cp ${LUKS_TESTS_DIR}/* "${OUTD}/luks_tests/"
   fi
 
   if [ "${copy_luks2_dir}" -eq 1 ]; then
@@ -4856,12 +6493,12 @@ if [ "${PACKAGE}" -eq 1 ]; then
 
   if [ "${copy_tc_dir}" -eq 1 ]; then
     mkdir "${OUTD}/tc_tests/"
-    cp ${TDIR}/tc_tests/* "${OUTD}/tc_tests/"
+    cp ${TC_TESTS_DIR}/* "${OUTD}/tc_tests/"
   fi
 
   if [ "${copy_vc_dir}" -eq 1 ]; then
     mkdir "${OUTD}/vc_tests/"
-    cp ${TDIR}/vc_tests/* "${OUTD}/vc_tests/"
+    cp ${VC_TESTS_DIR}/* "${OUTD}/vc_tests/"
   fi
 
   if [ "${copy_cl_dir}" -eq 1 ]; then
@@ -4912,12 +6549,14 @@ if [ "${PACKAGE}" -eq 1 ]; then
   fi
 
   HASH_TYPES_PACKAGED=$(   echo "${HASH_TYPES}"    | tr '\n' ' ' | sed 's/ *$//')
+  PM_MODES_PACKAGED=$(     echo "${PM_MODES}"      | tr '\n' ' ' | sed 's/ *$//')
   HASHFILE_ONLY_PACKAGED=$(echo "${HASHFILE_ONLY}" | tr '\n' ' ' | sed 's/ *$//')
   KEEP_GUESSING_PACKAGED=$(echo "${KEEP_GUESSING}" | tr '\n' ' ' | sed 's/ *$//')
   SLOW_ALGOS_PACKAGED=$(   echo "${SLOW_ALGOS}"    | tr '\n' ' ' | sed 's/ *$//')
 
   sed "${SED_IN_PLACE}" -e 's/^\(PACKAGE_FOLDER\)=""/\1="$( echo "${BASH_SOURCE[0]}" | sed \"s!test.sh\\$!!\" )"/' \
     -e "s/^\(HASH_TYPES\)=\$(.*/\1=\"${HASH_TYPES_PACKAGED}\"/" \
+    -e "s/^\(PM_MODES\)=\$(.*/\1=\"${PM_MODES_PACKAGED}\"/" \
     -e "s/^\(HASHFILE_ONLY\)=\$(.*/\1=\"${HASHFILE_ONLY_PACKAGED}\"/" \
     -e "s/^\(KEEP_GUESSING\)=\$(.*/\1=\"${KEEP_GUESSING_PACKAGED}\"/" \
     -e "s/^\(SLOW_ALGOS\)=\$(.*/\1=\"${SLOW_ALGOS_PACKAGED}\"/" \

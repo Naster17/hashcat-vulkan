@@ -34,6 +34,12 @@ void welcome_screen (hashcat_ctx_t *hashcat_ctx, const char *version_tag)
   if (user_options->quiet       == true)      return;
   if (user_options->keyspace    == true)      return;
   if (user_options->total_candidates == true) return;
+
+  // Both of these are tested on their own name because this runs before user_options_preprocess (),
+  // which is where they turn into --keyspace. By the time goodbye_screen () runs they have, so it
+  // needs neither.
+
+  if (user_options->lookup      != NULL)      return;
   if (user_options->stdout_flag == true)      return;
   if (user_options->show        == true)      return;
   if (user_options->left        == true)      return;
@@ -1781,6 +1787,7 @@ void backend_info (hashcat_ctx_t *hashcat_ctx)
         event_log_info (hashcat_ctx, "  Memory.Free....: %" PRIu64 " MB", device_available_mem / 1024 / 1024);
         event_log_info (hashcat_ctx, "  Memory.Unified.: %d", device_host_unified_memory);
         event_log_info (hashcat_ctx, "  Local.Memory...: %" PRIu64 " KB", device_local_mem_size / 1024);
+        event_log_info (hashcat_ctx, "  Cache.Size.....: %" PRIu64 " MB", device_param->device_cache_size / 1024 / 1024);
         event_log_info (hashcat_ctx, "  PCI.Addr.BDFe..: %04x:%02x:%02x.%u", (u16) pcie_domain, pcie_bus, pcie_device, pcie_function);
         event_log_info (hashcat_ctx, NULL);
       }
@@ -1937,6 +1944,7 @@ void backend_info (hashcat_ctx_t *hashcat_ctx)
         event_log_info (hashcat_ctx, "  Memory.Free....: %" PRIu64 " MB", device_available_mem / 1024 / 1024);
         event_log_info (hashcat_ctx, "  Memory.Unified.: %d", device_host_unified_memory);
         event_log_info (hashcat_ctx, "  Local.Memory...: %" PRIu64 " KB", device_local_mem_size / 1024);
+        event_log_info (hashcat_ctx, "  Cache.Size.....: %" PRIu64 " MB", device_param->device_cache_size / 1024 / 1024);
         event_log_info (hashcat_ctx, "  PCI.Addr.BDFe..: %04x:%02x:%02x.%u", (u16) pcie_domain, pcie_bus, pcie_device, pcie_function);
         event_log_info (hashcat_ctx, NULL);
       }
@@ -2089,6 +2097,7 @@ void backend_info (hashcat_ctx_t *hashcat_ctx)
         event_log_info (hashcat_ctx, "  Memory.Free....: %" PRIu64 " MB", device_available_mem / 1024 / 1024);
         event_log_info (hashcat_ctx, "  Memory.Unified.: %d", device_host_unified_memory);
         event_log_info (hashcat_ctx, "  Local.Memory...: %" PRIu64 " KB", device_local_mem_size / 1024);
+        event_log_info (hashcat_ctx, "  Cache.Size.....: %" PRIu64 " MB", device_param->device_cache_size / 1024 / 1024);
       }
       else
       {
