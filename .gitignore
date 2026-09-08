@@ -76,3 +76,6 @@ amd-bc250-docs/
 dist/
 
 /build/
+/modules
+/bridges
+/feeds

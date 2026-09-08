@@ -475,9 +475,15 @@ int folder_config_init (hashcat_ctx_t *hashcat_ctx, MAYBE_UNUSED const char *ins
   else
   {
     profile_dir = install_dir;
-    cache_dir   = install_dir;
     session_dir = install_dir;
     shared_dir  = install_dir;
+
+    // the kernel cache is a build artifact, so it lands in the build folder with the rest of
+    // what make writes, rather than in the source root
+
+    cache_dir = (char *) hcmalloc (HCBUFSIZ_TINY);
+
+    snprintf (cache_dir, HCBUFSIZ_TINY, "%s/build", install_dir);
   }
 
   hcfree (resolved_install_folder);

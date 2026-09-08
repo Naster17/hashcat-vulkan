@@ -395,7 +395,13 @@ DEPS_SSE2NEON           := deps/sse2neon
 
 BUILD_ROOT              ?= build
 
-HASHCAT_FRONTEND        := $(BUILD_ROOT)/hashcat
+# a windows build has no links and reads everything from beside the executable
+
+ifneq ($(findstring $(UNAME),CYGWIN MSYS2),)
+BUILD_ROOT              := .
+endif
+
+HASHCAT_FRONTEND        := hashcat
 HASHCAT_LIBRARY_NATIVE  := libhashcat.so.$(VERSION_MAJOR)
 HASHCAT_LIBRARY_LINUX   := libhashcat.so.$(VERSION_MAJOR)
 HASHCAT_LIBRARY_WIN     := hashcat.dll
@@ -414,12 +420,12 @@ HASHCAT_LIBRARY_NATIVE  := libhashcat.$(VERSION_MAJOR).dylib
 endif # Darwin
 
 ifeq ($(UNAME),CYGWIN)
-HASHCAT_FRONTEND        := $(BUILD_ROOT)/hashcat.exe
+HASHCAT_FRONTEND        := hashcat.exe
 HASHCAT_LIBRARY_NATIVE  := hashcat.dll
 endif # CYGWIN
 
 ifeq ($(UNAME),MSYS2)
-HASHCAT_FRONTEND        := $(BUILD_ROOT)/hashcat.exe
+HASHCAT_FRONTEND        := hashcat.exe
 HASHCAT_LIBRARY_NATIVE  := hashcat.dll
 endif # MSYS2
 
@@ -1307,7 +1313,7 @@ endif
 ## a PE linker and stopped the build.
 
 ifeq ($(FORMAT_NATIVE),MACHO)
-LFLAGS_FRONTEND_NATIVE  := -Wl,-rpath,@loader_path -Wl,-rpath,$(LIBRARY_FOLDER)
+LFLAGS_FRONTEND_NATIVE  := -Wl,-rpath,@loader_path/build -Wl,-rpath,$(LIBRARY_FOLDER)
 LFLAGS_PLUGIN_NATIVE    := -Wl,-rpath,@loader_path/.. -Wl,-rpath,$(LIBRARY_FOLDER)
 else ifeq ($(FORMAT_NATIVE),PE)
 LFLAGS_FRONTEND_NATIVE  :=
@@ -1324,7 +1330,7 @@ LFLAGS_PLUGIN_NATIVE    += -Wl,-z,defs
 endif
 endif
 
-LFLAGS_FRONTEND_LINUX   := -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,$(LIBRARY_FOLDER) -Wl,-z,origin
+LFLAGS_FRONTEND_LINUX   := -Wl,-rpath,'$$ORIGIN/build' -Wl,-rpath,$(LIBRARY_FOLDER) -Wl,-z,origin
 LFLAGS_PLUGIN_LINUX     := -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,$(LIBRARY_FOLDER) -Wl,-z,origin -Wl,-z,defs
 
 ##
@@ -1837,25 +1843,26 @@ $(foreach P,$(PLUGIN_PLATFORMS),$(foreach B,$(BRIDGES_ALL), \
 ##
 
 .PHONY: default
-default: $(HASHCAT_FRONTEND) modules bridges feeds build_links
+default: $(HASHCAT_FRONTEND) modules bridges feeds root_links
 
-## The runtime reads the shared resources from the folder the frontend lives in. Links rather
-## than copies: the tree keeps one copy of the kernel sources and the hcstat2 seed, and a
-## rebuilt kernel cache lands in the build folder with everything else. Windows has no links
-## and reads nothing from the shared folder at build time, so there this is a no-op.
+## The runtime resolves the shared folder from the location of the frontend, and the frontend
+## sits in the source root, where the kernel sources and the seed already live. What it reads
+## from beside itself and what make writes elsewhere is linked across: the plugins and the
+## library live in the build folder, and the root carries links to them. Windows has no links,
+## so there the build folder is the root and nothing is linked.
 
-BUILD_LINKS             := OpenCL tunings pcfg hashcat.hcstat2
+ROOT_LINKS              := modules bridges feeds libhashcat.so.7
 
-.PHONY: build_links
-build_links:
+.PHONY: root_links
+root_links:
 ifneq ($(findstring $(UNAME),CYGWIN MSYS2),)
 	@:
 else
 	@mkdir -p $(BUILD_ROOT)
-	@for LINK in $(BUILD_LINKS); do \
-	  if [ -L "$(BUILD_ROOT)/$$LINK" ]; then :; \
-	  elif [ -e "$(BUILD_ROOT)/$$LINK" ]; then echo "build/$$LINK exists and is not a link" >&2; exit 1; \
-	  else ln -s ../$$LINK $(BUILD_ROOT)/$$LINK; fi; \
+	@for LINK in $(ROOT_LINKS); do \
+	  if [ -L "$$LINK" ]; then :; \
+	  elif [ -e "$$LINK" ]; then echo "$$LINK exists and is not a link" >&2; exit 1; \
+	  else ln -s $(BUILD_ROOT)/$$LINK $$LINK; fi; \
 	done
 endif
 
