@@ -537,7 +537,10 @@ int hm_SYSFS_AMDGPU_get_pp_dpm_pcie (void *hashcat_ctx, const int backend_device
   return 0;
 }
 
-int hm_SYSFS_AMDGPU_get_gpu_busy_percent (void *hashcat_ctx, const int backend_device_idx, int *val)
+// the plain gpu_busy_percent reader, kept separate because the metrics reader above
+// falls back to it
+
+static int hm_SYSFS_AMDGPU_get_gpu_busy_percent_fallback (void *hashcat_ctx, const int backend_device_idx, int *val)
 {
   char *syspath = hm_SYSFS_AMDGPU_get_syspath_device (hashcat_ctx, backend_device_idx);
 
@@ -586,6 +589,61 @@ int hm_SYSFS_AMDGPU_get_gpu_busy_percent (void *hashcat_ctx, const int backend_d
   hcfree (path);
 
   return 0;
+}
+
+int hm_SYSFS_AMDGPU_get_gpu_busy_percent (void *hashcat_ctx, const int backend_device_idx, int *val)
+{
+  // gpu_busy_percent is answered with "Not supported" on some kernels (BC-250 among
+  // them), so the binary gpu_metrics blob is read first. Its gfx activity field
+  // carries the engine busy percentage in 0.1% steps. The blob layout is not
+  // versioned in a way a reader could rely on across families, so the offset used
+  // here is the one the tested board answers with and every field is sanity checked
+  // before it is trusted. The sysfs attribute stays as the fallback.
+
+  char *syspath = hm_SYSFS_AMDGPU_get_syspath_device (hashcat_ctx, backend_device_idx);
+
+  if (syspath == NULL) return -1;
+
+  char *path;
+
+  hc_asprintf (&path, "%s/gpu_metrics", syspath);
+
+  hcfree (syspath);
+
+  if (hc_path_read (path) == true)
+  {
+    HCFILE fp;
+
+    if (hc_fopen (&fp, path, "r") == true)
+    {
+      unsigned char blob[1024];
+
+      const size_t n = hc_fread (blob, 1, sizeof (blob), &fp);
+
+      hc_fclose (&fp);
+
+      // the tested firmware answers with a 128 byte blob in which the u16 at
+      // offset 0x40 is the gfx activity in 0.1% steps
+
+      if (n >= 0x42)
+      {
+        const u16 activity = (u16) (blob[0x40] | (blob[0x41] << 8));
+
+        if ((activity != 0xFFFF) && (activity <= 1000))
+        {
+          *val = (int) ((activity + 5) / 10);
+
+          hcfree (path);
+
+          return 0;
+        }
+      }
+    }
+  }
+
+  hcfree (path);
+
+  return hm_SYSFS_AMDGPU_get_gpu_busy_percent_fallback (hashcat_ctx, backend_device_idx, val);
 }
 
 int hm_SYSFS_AMDGPU_get_mem_info_vram_used (void *hashcat_ctx, const int backend_device_idx, u64 *val)
