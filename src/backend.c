@@ -10686,6 +10686,68 @@ static void backend_ctx_devices_none_reason (hashcat_ctx_t *hashcat_ctx)
 // no bridge and no per-API counters in backend_ctx, and the VkInstance is kept inside the first
 // claimed device so that cleanup can find it without a backend_ctx field.
 
+// The OpenCL C sources are translated to SPIR-V with clspv. Resolve the compiler once: an env
+// override first, then a clspv shipped beside the executable, then a locally built one, then the
+// distro one. Returns NULL when no clspv is available at all, which means no vulkan device can
+// build a kernel.
+
+static const char *vk_clspv_path_get (void)
+{
+  const char *clspv = getenv ("HASHCAT_CLSPV");
+
+  if ((clspv != NULL) && (clspv[0] != 0)) return clspv;
+
+  #if defined (__linux__)
+  static char clspv_beside_path[300];
+  static char clspv_home_path[300];
+
+  // prefer a clspv shipped next to the executable (portable builds), then
+  // a locally built one, then the distro one
+
+  ssize_t exe_len = readlink ("/proc/self/exe", clspv_beside_path, sizeof (clspv_beside_path) - strlen ("clspv") - 1);
+
+  if (exe_len > 0)
+  {
+    char *slash = strrchr (clspv_beside_path, '/');
+
+    if (slash != NULL)
+    {
+      slash[1] = '\0';
+
+      strcat (clspv_beside_path, "clspv");
+
+      if (access (clspv_beside_path, X_OK) == 0) return clspv_beside_path;
+    }
+  }
+
+  const char *clspv_candidates[4] =
+  {
+    "/usr/local/bin/clspv",
+    "/opt/clspv/build/bin/clspv",
+    NULL,
+    NULL,
+  };
+
+  const char *home = getenv ("HOME");
+
+  if (home != NULL)
+  {
+    snprintf (clspv_home_path, sizeof (clspv_home_path), "%s/opt/clspv-stable/build/bin/clspv", home);
+
+    clspv_candidates[2] = clspv_home_path;
+  }
+
+  for (size_t i = 0; i < sizeof (clspv_candidates) / sizeof (clspv_candidates[0]); i++)
+  {
+    const char *cand = clspv_candidates[i];
+
+    if ((cand != NULL) && (access (cand, X_OK) == 0)) return cand;
+  }
+  #endif
+
+  return NULL;
+}
+
 static void backend_ctx_devices_init_vulkan (hashcat_ctx_t *hashcat_ctx, int *backend_devices_idx)
 {
         backend_ctx_t   *backend_ctx   = hashcat_ctx->backend_ctx;
@@ -10788,6 +10850,16 @@ static void backend_ctx_devices_init_vulkan (hashcat_ctx_t *hashcat_ctx, int *ba
     if (strstr (name_lower, "llvmpipe")    != NULL) continue;
     if (strstr (name_lower, "lavapipe")    != NULL) continue;
     if (strstr (name_lower, "swiftshader") != NULL) continue;
+
+    // without clspv the device cannot build any kernel. If an OpenCL device covers the same
+    // hardware it carries the run, so the vulkan device skips instead of failing the session.
+
+    if (vk_clspv_path_get () == NULL)
+    {
+      event_log_warning (hashcat_ctx, "Vulkan: clspv not found, ignoring the Vulkan backend. The OpenCL backend will be used.");
+
+      return;
+    }
 
     const u32 device_id = (u32) *backend_devices_idx;
 
@@ -13259,70 +13331,9 @@ static bool load_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_p
     }
     else if (device_param->is_vulkan == true)
     {
-      const char *clspv = getenv ("HASHCAT_CLSPV");
+      const char *clspv = vk_clspv_path_get ();
 
-      char clspv_home_path[300] = { 0 };
-      char clspv_beside_path[300] = { 0 };
-
-      #if defined (__linux__)
-      // prefer a clspv shipped next to the executable (portable builds), then
-      // a locally built one, then the distro one
-      if ((clspv == NULL) || (clspv[0] == 0))
-      {
-        ssize_t exe_len = readlink ("/proc/self/exe", clspv_beside_path, sizeof (clspv_beside_path) - strlen ("clspv") - 1);
-
-        if (exe_len > 0)
-        {
-          char *slash = strrchr (clspv_beside_path, '/');
-
-          if (slash != NULL)
-          {
-            slash[1] = '\0';
-
-            strcat (clspv_beside_path, "clspv");
-
-            if (access (clspv_beside_path, X_OK) == 0)
-            {
-              clspv = clspv_beside_path;
-            }
-          }
-        }
-      }
-
-      if ((clspv == NULL) || (clspv[0] == 0))
-      {
-        const char *home = getenv ("HOME");
-
-        const char *clspv_candidates[4] =
-        {
-          "/usr/local/bin/clspv",
-          "/opt/clspv/build/bin/clspv",
-          NULL,
-          NULL,
-        };
-
-        if (home != NULL)
-        {
-          snprintf (clspv_home_path, sizeof (clspv_home_path), "%s/opt/clspv-stable/build/bin/clspv", home);
-
-          clspv_candidates[2] = clspv_home_path;
-        }
-
-        for (size_t i = 0; i < sizeof (clspv_candidates) / sizeof (clspv_candidates[0]); i++)
-        {
-          const char *cand = clspv_candidates[i];
-
-          if ((cand != NULL) && (access (cand, X_OK) == 0))
-          {
-            clspv = cand;
-
-            break;
-          }
-        }
-      }
-      #endif
-
-      if ((clspv == NULL) || (clspv[0] == 0)) clspv = "/usr/bin/clspv";
+      if (clspv == NULL) clspv = "/usr/bin/clspv";
 
       const char *opencl_dir = folder_config->cpath_real;
 
