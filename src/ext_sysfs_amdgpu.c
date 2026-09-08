@@ -52,7 +52,12 @@ void sysfs_amdgpu_close (void *hashcat_ctx)
 // governor daemon races the power state machine. A read that never returns would hang the
 // whole session, so every read through sysfs_fgets_timeout () is bounded by a watchdog alarm.
 
+// the watchdog needs the POSIX alarm machinery. On Windows there is no sysfs to hang on, so
+// the read falls back to a plain fgets.
+
 #define SYSFS_AMDGPU_READ_TIMEOUT 2
+
+#ifndef _WIN32
 
 static sigjmp_buf sysfs_amdgpu_jmp;
 
@@ -96,6 +101,15 @@ static char *sysfs_fgets_timeout (char *buf, const int len, HCFILE *fp)
 
   return r;
 }
+
+#else
+
+static char *sysfs_fgets_timeout (char *buf, const int len, HCFILE *fp)
+{
+  return hc_fgets (buf, len, fp);
+}
+
+#endif
 
 char *hm_SYSFS_AMDGPU_get_syspath_device (void *hashcat_ctx, const int backend_device_idx)
 {
