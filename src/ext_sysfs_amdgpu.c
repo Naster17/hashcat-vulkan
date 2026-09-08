@@ -13,6 +13,10 @@
 #include "folder.h"
 #include "ext_sysfs_amdgpu.h"
 
+#include <setjmp.h>
+#include <signal.h>
+#include <unistd.h>
+
 bool sysfs_amdgpu_init (void *hashcat_ctx)
 {
   hwmon_ctx_t *hwmon_ctx = ((hashcat_ctx_t *) hashcat_ctx)->hwmon_ctx;
@@ -42,6 +46,55 @@ void sysfs_amdgpu_close (void *hashcat_ctx)
   {
     hcfree (sysfs_amdgpu);
   }
+}
+
+// SMU backed sysfs attributes can block indefinitely on some boards, for example while a
+// governor daemon races the power state machine. A read that never returns would hang the
+// whole session, so every read through sysfs_fgets_timeout () is bounded by a watchdog alarm.
+
+#define SYSFS_AMDGPU_READ_TIMEOUT 2
+
+static sigjmp_buf sysfs_amdgpu_jmp;
+
+static volatile sig_atomic_t sysfs_amdgpu_jump = 0;
+
+static void sysfs_amdgpu_watchdog_handler (int signum)
+{
+  if (sysfs_amdgpu_jump == 1)
+  {
+    siglongjmp (sysfs_amdgpu_jmp, 1);
+  }
+}
+
+static char *sysfs_fgets_timeout (char *buf, const int len, HCFILE *fp)
+{
+  struct sigaction sa;
+  struct sigaction old;
+
+  memset (&sa, 0, sizeof (sa));
+
+  sa.sa_handler = sysfs_amdgpu_watchdog_handler;
+
+  char *r = NULL;
+
+  sigaction (SIGALRM, &sa, &old);
+
+  if (sigsetjmp (sysfs_amdgpu_jmp, 1) == 0)
+  {
+    sysfs_amdgpu_jump = 1;
+
+    alarm (SYSFS_AMDGPU_READ_TIMEOUT);
+
+    r = hc_fgets (buf, len, fp);
+
+    alarm (0);
+  }
+
+  sysfs_amdgpu_jump = 0;
+
+  sigaction (SIGALRM, &old, NULL);
+
+  return r;
 }
 
 char *hm_SYSFS_AMDGPU_get_syspath_device (void *hashcat_ctx, const int backend_device_idx)
@@ -234,11 +287,20 @@ int hm_SYSFS_AMDGPU_get_temperature_current (void *hashcat_ctx, const int backen
 
   int temperature = 0;
 
-  if (hc_fscanf (&fp, "%d", &temperature) != 1)
+  char buf[HCBUFSIZ_TINY] = { 0 };
+
+  if (sysfs_fgets_timeout (buf, sizeof (buf), &fp) == NULL)
   {
     hc_fclose (&fp);
 
-    event_log_error (hashcat_ctx, "%s: unexpected data.", path);
+    hcfree (path);
+
+    return -1;
+  }
+
+  if (sscanf (buf, "%d", &temperature) != 1)
+  {
+    hc_fclose (&fp);
 
     hcfree (path);
 
@@ -283,7 +345,7 @@ int hm_SYSFS_AMDGPU_get_pp_dpm_sclk (void *hashcat_ctx, const int backend_device
   {
     char buf[HCBUFSIZ_TINY] = { 0 };
 
-    char *ptr = hc_fgets (buf, sizeof (buf), &fp);
+    char *ptr = sysfs_fgets_timeout (buf, sizeof (buf), &fp);
 
     if (ptr == NULL) break;
 
@@ -338,7 +400,7 @@ int hm_SYSFS_AMDGPU_get_pp_dpm_mclk (void *hashcat_ctx, const int backend_device
   {
     char buf[HCBUFSIZ_TINY];
 
-    char *ptr = hc_fgets (buf, sizeof (buf), &fp);
+    char *ptr = sysfs_fgets_timeout (buf, sizeof (buf), &fp);
 
     if (ptr == NULL) break;
 
@@ -393,7 +455,7 @@ int hm_SYSFS_AMDGPU_get_pp_dpm_pcie (void *hashcat_ctx, const int backend_device
   {
     char buf[HCBUFSIZ_TINY];
 
-    char *ptr = hc_fgets (buf, sizeof (buf), &fp);
+    char *ptr = sysfs_fgets_timeout (buf, sizeof (buf), &fp);
 
     if (ptr == NULL) break;
 
@@ -444,7 +506,7 @@ int hm_SYSFS_AMDGPU_get_gpu_busy_percent (void *hashcat_ctx, const int backend_d
   {
     char buf[HCBUFSIZ_TINY];
 
-    char *ptr = hc_fgets (buf, sizeof (buf), &fp);
+    char *ptr = sysfs_fgets_timeout (buf, sizeof (buf), &fp);
 
     if (ptr == NULL) break;
 
@@ -495,7 +557,7 @@ int hm_SYSFS_AMDGPU_get_mem_info_vram_used (void *hashcat_ctx, const int backend
   {
     char buf[HCBUFSIZ_TINY];
 
-    char *ptr = hc_fgets (buf, sizeof (buf), &fp);
+    char *ptr = sysfs_fgets_timeout (buf, sizeof (buf), &fp);
 
     if (ptr == NULL) break;
 
