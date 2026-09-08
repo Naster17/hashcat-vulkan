@@ -1,3 +1,5 @@
+BUILD_ROOT ?= build
+
 BRIDGE_SRC_bridge_python_generic_hash_mp := src/bridges/bridge_python_generic_hash_mp.c src/cpu_features.c
 
 PYTHON_MP_SKIP_SO  := false
@@ -47,7 +49,7 @@ RESET = \033[0m
 ifeq ($(PYTHON_MP_SKIP_SO),true)
 BRIDGE_SKIP_bridge_python_generic_hash_mp_$(PLUGIN_PLATFORM_so) := 1
 
-bridges/bridge_python_generic_hash_mp.so:
+$(BUILD_ROOT)/bridges/bridge_python_generic_hash_mp.so:
 	@echo ""
 	@echo "$(RED)WARNING$(RESET): Skipping regular plugin 73000: Python headers not found."
 	@echo "         To use -m 73000, you must install the required Python headers."
@@ -59,7 +61,7 @@ endif
 ifeq ($(PYTHON_MP_SKIP_DLL),true)
 BRIDGE_SKIP_bridge_python_generic_hash_mp_$(PLUGIN_PLATFORM_dll) := 1
 
-bridges/bridge_python_generic_hash_mp.dll:
+$(BUILD_ROOT)/bridges/bridge_python_generic_hash_mp.dll:
 	@echo ""
 	@echo "$(RED)WARNING$(RESET): Skipping regular plugin 73000: Python Windows headers not found."
 	@echo "         To use -m 73000, you must install the required Python headers."

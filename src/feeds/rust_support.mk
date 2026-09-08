@@ -58,6 +58,8 @@ endif
 # The copy is skipped when the library is unchanged, so a build that did nothing does not hand a
 # fresh timestamp to anything downstream.
 
+BUILD_ROOT ?= build
+
 .PHONY: FORCE
 FORCE:
 
@@ -68,16 +70,18 @@ FORCE:
 # its own parallelism, and the alternative of marking the recipe as recursive would also make it run
 # during a dry run.
 
-feeds/rust_%.so: $(RUST_SCAN_DIR)/%/Cargo.toml FORCE
+$(BUILD_ROOT)/feeds/rust_%.so: $(RUST_SCAN_DIR)/%/Cargo.toml FORCE
 	MAKEFLAGS= FEEDS_INTERFACE_VERSION_CURRENT="$(FEEDS_INTERFACE_VERSION)" RUSTFLAGS="$(RUSTFLAGS_SO)" $(RUST_CARGO) build --quiet $(RUST_MODE_FLAG) --manifest-path $<
+	@mkdir -p $(dir $@)
 	@cmp -s Rust/feeds/$*/target/$(RUST_BUILD_MODE)/lib$*.$(RUST_LIB_EXT) $@ 2>/dev/null || cp Rust/feeds/$*/target/$(RUST_BUILD_MODE)/lib$*.$(RUST_LIB_EXT) $@
 ifeq ($(RUSTUP_PRESENT),true)
-feeds/rust_%.dll: $(RUST_SCAN_DIR)/%/Cargo.toml FORCE
+$(BUILD_ROOT)/feeds/rust_%.dll: $(RUST_SCAN_DIR)/%/Cargo.toml FORCE
 	$(RUST_RUSTUP) --quiet target add x86_64-pc-windows-gnu
 	MAKEFLAGS= FEEDS_INTERFACE_VERSION_CURRENT="$(FEEDS_INTERFACE_VERSION)" RUSTFLAGS="$(RUSTFLAGS_DLL)" $(RUST_CARGO) build --quiet $(RUST_MODE_FLAG) --manifest-path $< --target x86_64-pc-windows-gnu
+	@mkdir -p $(dir $@)
 	@cmp -s Rust/feeds/$*/target/x86_64-pc-windows-gnu/$(RUST_BUILD_MODE)/$*.dll $@ 2>/dev/null || cp Rust/feeds/$*/target/x86_64-pc-windows-gnu/$(RUST_BUILD_MODE)/$*.dll $@
 else
-feeds/rust_%.dll: $(RUST_SCAN_DIR)/%/Cargo.toml
+$(BUILD_ROOT)/feeds/rust_%.dll: $(RUST_SCAN_DIR)/%/Cargo.toml
 	@echo ""
 	@echo "$(RED)WARNING$(RESET): Skipping genereric attack-mode 8 plugin: rustup not found."
 	@echo "         To use it, you must install Rust."
@@ -86,14 +90,14 @@ feeds/rust_%.dll: $(RUST_SCAN_DIR)/%/Cargo.toml
 	@echo ""
 endif
 else
-feeds/rust_%.so: $(RUST_SCAN_DIR)/%/Cargo.toml
+$(BUILD_ROOT)/feeds/rust_%.so: $(RUST_SCAN_DIR)/%/Cargo.toml
 	@echo ""
 	@echo "$(RED)WARNING$(RESET): Skipping genereric attack-mode 8 plugin: cargo not found."
 	@echo "         To use it, you must install Rust."
 	@echo "         Otherwise, you can safely ignore this warning."
 	@echo "         For more information, see 'docs/hashcat-rust-plugin-requirements.md'."
 	@echo ""
-feeds/rust_%.dll: $(RUST_SCAN_DIR)/%/Cargo.toml
+$(BUILD_ROOT)/feeds/rust_%.dll: $(RUST_SCAN_DIR)/%/Cargo.toml
 	@echo ""
 	@echo "$(RED)WARNING$(RESET): Skipping genereric attack-mode 8 plugin: cargo not found."
 	@echo "         To use it, you must install Rust."
@@ -108,5 +112,5 @@ FEEDS_RUST_SRC := $(wildcard $(RUST_SCAN_DIR)/*/Cargo.toml)
 # plugins this run is building
 
 $(foreach P,$(PLUGIN_PLATFORMS),$(eval feeds$(PHONY_SUFFIX_$(P)): \
-  $(patsubst $(RUST_SCAN_DIR)/%/Cargo.toml,feeds/rust_%.$(PLUGIN_SUFFIX_$(P)),$(FEEDS_RUST_SRC))))
+  $(patsubst $(RUST_SCAN_DIR)/%/Cargo.toml,$(BUILD_ROOT)/feeds/rust_%.$(PLUGIN_SUFFIX_$(P)),$(FEEDS_RUST_SRC))))
 

@@ -315,7 +315,7 @@ else
 VERSION_TAG             := $(shell git describe --tags --dirty=+ || echo $(PRODUCTION_VERSION))
 endif # PRODUCTION
 
-VERSION_PURE            := $(shell echo "$(VERSION_TAG)" | $(SED) 's/.*v\([\.0-9]*\).*/\1/')
+VERSION_PURE            := $(shell echo "$(VERSION_TAG)" | $(SED) 's/[^0-9]*\([0-9][0-9.]*\).*/\1/')
 VERSION_MAJOR           := $(firstword $(subst ., ,$(VERSION_PURE)))
 
 ##
@@ -387,7 +387,15 @@ DEPS_SSE2NEON           := deps/sse2neon
 ## environment, which is the whole reason the package is laid out that way.
 ##
 
-HASHCAT_FRONTEND        := hashcat
+## Everything the build produces lands in this one folder: the objects, the library, the
+## frontend and the plugins. The runtime resolves the shared folder from the location of the
+## frontend, so make links the resources it reads (the kernel sources, the tunings, the pcfg
+## grammars and the hcstat2 seed) into here, and the kernel cache and the session files land
+## beside them at run time. The source tree stays free of everything a build and a run write.
+
+BUILD_ROOT              ?= build
+
+HASHCAT_FRONTEND        := $(BUILD_ROOT)/hashcat
 HASHCAT_LIBRARY_NATIVE  := libhashcat.so.$(VERSION_MAJOR)
 HASHCAT_LIBRARY_LINUX   := libhashcat.so.$(VERSION_MAJOR)
 HASHCAT_LIBRARY_WIN     := hashcat.dll
@@ -406,18 +414,18 @@ HASHCAT_LIBRARY_NATIVE  := libhashcat.$(VERSION_MAJOR).dylib
 endif # Darwin
 
 ifeq ($(UNAME),CYGWIN)
-HASHCAT_FRONTEND        := hashcat.exe
+HASHCAT_FRONTEND        := $(BUILD_ROOT)/hashcat.exe
 HASHCAT_LIBRARY_NATIVE  := hashcat.dll
 endif # CYGWIN
 
 ifeq ($(UNAME),MSYS2)
-HASHCAT_FRONTEND        := hashcat.exe
+HASHCAT_FRONTEND        := $(BUILD_ROOT)/hashcat.exe
 HASHCAT_LIBRARY_NATIVE  := hashcat.dll
 endif # MSYS2
 
 # make install and make uninstall run on this machine and touch nothing a cross build wrote
 
-HASHCAT_LIBRARY         := $(HASHCAT_LIBRARY_NATIVE)
+HASHCAT_LIBRARY         := $(BUILD_ROOT)/$(HASHCAT_LIBRARY_NATIVE)
 
 ##
 ## Shared compiler and linker options
@@ -1330,16 +1338,16 @@ LFLAGS_PLUGIN_LINUX     := -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,$(LIBRARY_FOLDER)
 ## name in either case, so neither side needs a stub library of its own.
 ##
 
-CORE_NATIVE             := obj/combined.NATIVE.a
-CORE_LINUX              := obj/combined.LINUX.a
-CORE_WIN                := obj/combined.WIN.a
+CORE_NATIVE             := $(BUILD_ROOT)/obj/combined.NATIVE.a
+CORE_LINUX              := $(BUILD_ROOT)/obj/combined.LINUX.a
+CORE_WIN                := $(BUILD_ROOT)/obj/combined.WIN.a
 
-$(foreach P,$(SHARED_PLATFORMS),$(eval CORE_$(P) := $(HASHCAT_LIBRARY_$(P))))
+$(foreach P,$(SHARED_PLATFORMS),$(eval CORE_$(P) := $(BUILD_ROOT)/$(HASHCAT_LIBRARY_$(P))))
 
 # on Apple Silicon the archive is removed before it is written, rather than updated in place
 ifeq ($(UNAME),Darwin)
 ifeq ($(IS_APPLE_SILICON),1)
-ARCHIVE_CLEAN_NATIVE    := $(RM) -f obj/combined.NATIVE.a
+ARCHIVE_CLEAN_NATIVE    := $(RM) -f $(BUILD_ROOT)/obj/combined.NATIVE.a
 endif
 endif
 
@@ -1359,30 +1367,30 @@ ifeq ($(ENABLE_BRAIN),1)
 OBJS_ALL                += brain
 endif
 
-CORE_OBJS_NATIVE        := $(foreach OBJ,$(OBJS_ALL),obj/$(OBJ).NATIVE.o)
-CORE_OBJS_LINUX         := $(foreach OBJ,$(OBJS_ALL),obj/$(OBJ).LINUX.o)
-CORE_OBJS_WIN           := $(foreach OBJ,$(OBJS_ALL),obj/$(OBJ).WIN.o)
+CORE_OBJS_NATIVE        := $(foreach OBJ,$(OBJS_ALL),$(BUILD_ROOT)/obj/$(OBJ).NATIVE.o)
+CORE_OBJS_LINUX         := $(foreach OBJ,$(OBJS_ALL),$(BUILD_ROOT)/obj/$(OBJ).LINUX.o)
+CORE_OBJS_WIN           := $(foreach OBJ,$(OBJS_ALL),$(BUILD_ROOT)/obj/$(OBJ).WIN.o)
 
 ifeq ($(UNAME),Darwin)
 OBJS_METAL              := ext_metal ext_iokit
 
-CORE_OBJS_NATIVE        += $(foreach OBJ,$(OBJS_METAL),obj/$(OBJ).METAL.NATIVE.o)
+CORE_OBJS_NATIVE        += $(foreach OBJ,$(OBJS_METAL),$(BUILD_ROOT)/obj/$(OBJ).METAL.NATIVE.o)
 endif
 
 ifeq ($(USE_SYSTEM_LZMA),0)
 OBJS_LZMA               := 7zCrc 7zCrcOpt 7zFile 7zStream Alloc Bra Bra86 BraIA64 CpuArch Delta LzmaDec Lzma2Dec MtDec Sha256 Sha256Opt Threads Xz XzCrc64 XzCrc64Opt XzDec XzIn
 
-CORE_OBJS_NATIVE        += $(foreach OBJ,$(OBJS_LZMA),obj/$(OBJ).LZMA.NATIVE.o)
-CORE_OBJS_LINUX         += $(foreach OBJ,$(OBJS_LZMA),obj/$(OBJ).LZMA.LINUX.o)
-CORE_OBJS_WIN           += $(foreach OBJ,$(OBJS_LZMA),obj/$(OBJ).LZMA.WIN.o)
+CORE_OBJS_NATIVE        += $(foreach OBJ,$(OBJS_LZMA),$(BUILD_ROOT)/obj/$(OBJ).LZMA.NATIVE.o)
+CORE_OBJS_LINUX         += $(foreach OBJ,$(OBJS_LZMA),$(BUILD_ROOT)/obj/$(OBJ).LZMA.LINUX.o)
+CORE_OBJS_WIN           += $(foreach OBJ,$(OBJS_LZMA),$(BUILD_ROOT)/obj/$(OBJ).LZMA.WIN.o)
 endif
 
 ifeq ($(USE_SYSTEM_ZLIB),0)
 OBJS_ZLIB               := adler32 crc32 deflate inflate inffast inftrees trees gzread gzwrite gzclose zutil gzlib contrib/minizip/unzip contrib/minizip/ioapi
 
-CORE_OBJS_NATIVE        += $(foreach OBJ,$(OBJS_ZLIB),obj/$(OBJ).ZLIB.NATIVE.o)
-CORE_OBJS_LINUX         += $(foreach OBJ,$(OBJS_ZLIB),obj/$(OBJ).ZLIB.LINUX.o)
-CORE_OBJS_WIN           += $(foreach OBJ,$(OBJS_ZLIB),obj/$(OBJ).ZLIB.WIN.o)
+CORE_OBJS_NATIVE        += $(foreach OBJ,$(OBJS_ZLIB),$(BUILD_ROOT)/obj/$(OBJ).ZLIB.NATIVE.o)
+CORE_OBJS_LINUX         += $(foreach OBJ,$(OBJS_ZLIB),$(BUILD_ROOT)/obj/$(OBJ).ZLIB.LINUX.o)
+CORE_OBJS_WIN           += $(foreach OBJ,$(OBJS_ZLIB),$(BUILD_ROOT)/obj/$(OBJ).ZLIB.WIN.o)
 endif
 
 # the brain is the only thing in the core that hashes with xxhash, so it is compiled in beside it.
@@ -1393,9 +1401,9 @@ ifeq ($(ENABLE_BRAIN),1)
 ifeq ($(USE_SYSTEM_XXHASH),0)
 OBJS_XXHASH             := xxhash
 
-CORE_OBJS_NATIVE        += $(foreach OBJ,$(OBJS_XXHASH),obj/$(OBJ).XXHASH.NATIVE.o)
-CORE_OBJS_LINUX         += $(foreach OBJ,$(OBJS_XXHASH),obj/$(OBJ).XXHASH.LINUX.o)
-CORE_OBJS_WIN           += $(foreach OBJ,$(OBJS_XXHASH),obj/$(OBJ).XXHASH.WIN.o)
+CORE_OBJS_NATIVE        += $(foreach OBJ,$(OBJS_XXHASH),$(BUILD_ROOT)/obj/$(OBJ).XXHASH.NATIVE.o)
+CORE_OBJS_LINUX         += $(foreach OBJ,$(OBJS_XXHASH),$(BUILD_ROOT)/obj/$(OBJ).XXHASH.LINUX.o)
+CORE_OBJS_WIN           += $(foreach OBJ,$(OBJS_XXHASH),$(BUILD_ROOT)/obj/$(OBJ).XXHASH.WIN.o)
 endif
 endif
 
@@ -1403,9 +1411,9 @@ ifeq ($(ENABLE_UNRAR),1)
 ifeq ($(USE_SYSTEM_UNRAR),0)
 OBJS_UNRAR              := strlist strfn pathfn smallfn global file filefn filcreat archive arcread unicode system isnt crypt crc rawread encname resource match timefn rdwrfn consio options errhnd rarvm secpassword rijndael getbits sha1 sha256 blake2s hash extinfo extract volume list find unpack headers threadpool rs16 cmddata ui filestr recvol rs scantree qopen hc_decompress_rar
 
-CORE_OBJS_NATIVE        += $(foreach OBJ,$(OBJS_UNRAR),obj/$(OBJ).UNRAR.NATIVE.o)
-CORE_OBJS_LINUX         += $(foreach OBJ,$(OBJS_UNRAR),obj/$(OBJ).UNRAR.LINUX.o)
-CORE_OBJS_WIN           += $(foreach OBJ,$(OBJS_UNRAR),obj/$(OBJ).UNRAR.WIN.o)
+CORE_OBJS_NATIVE        += $(foreach OBJ,$(OBJS_UNRAR),$(BUILD_ROOT)/obj/$(OBJ).UNRAR.NATIVE.o)
+CORE_OBJS_LINUX         += $(foreach OBJ,$(OBJS_UNRAR),$(BUILD_ROOT)/obj/$(OBJ).UNRAR.LINUX.o)
+CORE_OBJS_WIN           += $(foreach OBJ,$(OBJS_UNRAR),$(BUILD_ROOT)/obj/$(OBJ).UNRAR.WIN.o)
 endif
 endif
 
@@ -1430,8 +1438,8 @@ FEEDS_DISABLE           ?=
 
 ifeq ($(ENABLE_UNRAR),0)
 MODULES_SRC             := $(filter-out src/modules/module_23800.c,$(MODULES_SRC))
-MODULES_DISABLE         += modules/module_23800.so
-MODULES_DISABLE         += modules/module_23800.dll
+MODULES_DISABLE         += $(BUILD_ROOT)/modules/module_23800.so
+MODULES_DISABLE         += $(BUILD_ROOT)/modules/module_23800.dll
 endif
 
 $(MODULES_DISABLE): ;
@@ -1494,7 +1502,7 @@ $(foreach B,$(BRIDGES_ALL),$(eval BRIDGE_SRC_$(B) ?= src/bridges/$(B).c))
 
 DEPFLAGS                := -MMD -MP
 
-DEPS_ALL                := $(wildcard obj/*.d obj/*/*.d obj/*/*/*.d)
+DEPS_ALL                := $(wildcard $(BUILD_ROOT)/obj/*.d $(BUILD_ROOT)/obj/*/*.d $(BUILD_ROOT)/obj/*/*/*.d)
 
 -include $(DEPS_ALL)
 
@@ -1536,7 +1544,7 @@ API_HEADER_ROOTS        += include/thread.h
 # the way a plugin reads them, which is what the set is for, so the plugin interface version is on
 # this line as well: the three headers only a plugin includes refuse to be read without it.
 
-API_INCLUDES             = $(shell $(CC_NATIVE) $(CCFLAGS) $(CFLAGS_NATIVE) $(CFLAGS_ABI) -MM obj/api.c)
+API_INCLUDES             = $(shell $(CC_NATIVE) $(CCFLAGS) $(CFLAGS_NATIVE) $(CFLAGS_ABI) -MM $(BUILD_ROOT)/obj/api.c)
 
 API_HEADERS              = $(sort $(filter include/%.h,$(API_INCLUDES)))
 
@@ -1550,7 +1558,7 @@ API_DEP_HEADERS          = $(sort $(filter deps/%.h,$(API_INCLUDES)))
 
 API_DEP_ROOTS           := $(DEPS_ZLIB_PATH)/contrib $(DEPS_LZMA_PATH) $(DEPS_ZLIB_PATH) $(DEPS_OPENCL_PATH) $(DEPS_XXHASH_PATH)
 
-obj/api.c: $(API_HEADER_ROOTS)
+$(BUILD_ROOT)/obj/api.c: $(API_HEADER_ROOTS)
 	printf '#include "common.h"\n#include "types.h"\n' > $@
 	printf '#include "%s"\n' $(sort $(notdir $(API_HEADER_ROOTS))) >> $@
 
@@ -1577,7 +1585,8 @@ ARRANGEMENT             := SHARED=$(SHARED) PLUGIN_ABI=$(MODULE_INTERFACE_VERSIO
 .PHONY: FORCE
 FORCE:
 
-obj/arrangement: FORCE
+$(BUILD_ROOT)/obj/arrangement: FORCE
+	@mkdir -p $(BUILD_ROOT)/obj
 	@printf '%s\n' "$(ARRANGEMENT)" | cmp -s - $@ || printf '%s\n' "$(ARRANGEMENT)" > $@
 
 ##
@@ -1589,32 +1598,37 @@ obj/arrangement: FORCE
 
 define CORE_RULES
 
-obj/%.$(1).o: src/%.c obj/arrangement
+$(BUILD_ROOT)/obj/%.$(1).o: src/%.c $(BUILD_ROOT)/obj/arrangement
+	@mkdir -p $$(@D)
 	$$(CC_$(1)) $$(CCFLAGS) $$(CFLAGS_$(1)) $$(CFLAGS_CORE) $$(DEPFLAGS) -c -o $$@ $$< $$(CFLAGS_PIC_$(1))
 
 ifeq ($(USE_SYSTEM_LZMA),0)
-obj/%.LZMA.$(1).o: $$(DEPS_LZMA_PATH)/%.c obj/arrangement
+$(BUILD_ROOT)/obj/%.LZMA.$(1).o: $$(DEPS_LZMA_PATH)/%.c $(BUILD_ROOT)/obj/arrangement
+	@mkdir -p $$(@D)
 	$$(CC_$(1)) $$(CCFLAGS) $$(CFLAGS_$(1)) $$(CFLAGS_CORE) $$(CFLAGS_LZMA_$(1)) $$(DEPFLAGS) -c -o $$@ $$< $$(CFLAGS_PIC_$(1))
 endif
 
 ifeq ($(USE_SYSTEM_ZLIB),0)
-obj/%.ZLIB.$(1).o: $$(DEPS_ZLIB_PATH)/%.c obj/arrangement
+$(BUILD_ROOT)/obj/%.ZLIB.$(1).o: $$(DEPS_ZLIB_PATH)/%.c $(BUILD_ROOT)/obj/arrangement
+	@mkdir -p $$(@D)
 	$$(CC_$(1)) $$(CCFLAGS) $$(CFLAGS_$(1)) $$(CFLAGS_CORE) $$(CFLAGS_ZLIB_$(1)) $$(DEPFLAGS) -c -o $$@ $$< $$(CFLAGS_PIC_$(1))
 endif
 
 ifeq ($(USE_SYSTEM_XXHASH),0)
-obj/%.XXHASH.$(1).o: $$(DEPS_XXHASH_PATH)/%.c obj/arrangement
+$(BUILD_ROOT)/obj/%.XXHASH.$(1).o: $$(DEPS_XXHASH_PATH)/%.c $(BUILD_ROOT)/obj/arrangement
+	@mkdir -p $$(@D)
 	$$(CC_$(1)) $$(CCFLAGS) $$(CFLAGS_$(1)) $$(CFLAGS_CORE) $$(DEPFLAGS) -c -o $$@ $$< $$(CFLAGS_PIC_$(1))
 endif
 
 ifeq ($(ENABLE_UNRAR),1)
 ifeq ($(USE_SYSTEM_UNRAR),0)
-obj/%.UNRAR.$(1).o: $$(DEPS_UNRAR_PATH)/%.cpp obj/arrangement
+$(BUILD_ROOT)/obj/%.UNRAR.$(1).o: $$(DEPS_UNRAR_PATH)/%.cpp $(BUILD_ROOT)/obj/arrangement
+	@mkdir -p $$(@D)
 	$$(CXX_$(1)) $$(CXXFLAGS) $$(CFLAGS_$(1)) $$(CFLAGS_CORE) $$(CFLAGS_UNRAR_$(1)) $$(DEPFLAGS) -c -o $$@ $$< $$(CFLAGS_PIC_$(1))
 endif
 endif
 
-obj/combined.$(1).a: $$(CORE_OBJS_$(1))
+$(BUILD_ROOT)/obj/combined.$(1).a: $$(CORE_OBJS_$(1))
 	$$(ARCHIVE_CLEAN_$(1))
 	$$(AR_$(1)) rcs $$@ $$(CORE_OBJS_$(1))
 
@@ -1625,7 +1639,7 @@ $(foreach P,$(PLATFORMS),$(eval $(call CORE_RULES,$(P))))
 # the two Metal sources are Objective C and only ever built here, so they are outside the set above
 
 ifeq ($(UNAME),Darwin)
-obj/%.METAL.NATIVE.o: src/%.m obj/arrangement
+$(BUILD_ROOT)/obj/%.METAL.NATIVE.o: src/%.m $(BUILD_ROOT)/obj/arrangement
 	$(CC_NATIVE) $(CCFLAGS) $(CFLAGS_NATIVE) $(CFLAGS_CORE) $(DEPFLAGS) -c -o $@ $< $(CFLAGS_PIC_NATIVE)
 endif
 
@@ -1727,7 +1741,8 @@ endif
 
 define LIBRARY_RULES
 
-$$(HASHCAT_LIBRARY_$(1)): $$(CORE_OBJS_$(1)) $$(LIBRARY_INPUTS_$(1)) obj/arrangement
+$$(BUILD_ROOT)/$$(HASHCAT_LIBRARY_$(1)): $$(CORE_OBJS_$(1)) $$(LIBRARY_INPUTS_$(1)) $(BUILD_ROOT)/obj/arrangement
+	@mkdir -p $$(@D)
 	$$(CXX_$(1)) $$(CORE_OBJS_$(1)) $$(LIBRARY_INPUTS_$(1)) -o $$@ $$(filter-out $$(LFLAGS_$(1)_LIBRARY_FILTER),$$(LFLAGS_$(1))) $$(LIBRARY_LFLAGS_$(1))
 
 endef
@@ -1751,8 +1766,9 @@ FRONTEND_DEFINES_WIN    := $(FRONTEND_DEFINES)
 
 frontend_link = $(CC_$(1)) $(CCFLAGS) $(CFLAGS_$(1)) $(HARDEN_FRONTEND_$(1)) $(DEPFLAGS) -MF $(2) src/main.c $(CORE_$(1)) $(3) -o $@ $(LFLAGS_$(1)) $(if $(filter $(1),$(SHARED_PLATFORMS)),$(LFLAGS_FRONTEND_$(1))) $(4) $(FRONTEND_DEFINES_$(1))
 
-$(HASHCAT_FRONTEND): src/main.c $(CORE_NATIVE) obj/arrangement
-	$(call frontend_link,NATIVE,obj/main.NATIVE.d,,)
+$(HASHCAT_FRONTEND): src/main.c $(CORE_NATIVE) $(BUILD_ROOT)/obj/arrangement
+	@mkdir -p $(dir $@)
+	$(call frontend_link,NATIVE,$(BUILD_ROOT)/obj/main.NATIVE.d,,)
 
 ##
 ## Rules: the plugins
@@ -1775,18 +1791,20 @@ plugin_link = $(CC_$(1)) $(CCFLAGS) $(CFLAGS_PLUGIN_$(1)) $(CFLAGS_ABI) $(if $(3
 
 define PLUGIN_RULES
 
-modules/module_%.$(PLUGIN_SUFFIX_$(1)): src/modules/module_%.c $$(CORE_$(1)) obj/arrangement
-	$$(call plugin_link,$(1),$$<,obj/module_$$*.$(1).d,MODULE_INTERFACE_VERSION_CURRENT=$$(MODULE_INTERFACE_VERSION),)
+$(BUILD_ROOT)/modules/module_%.$(PLUGIN_SUFFIX_$(1)): src/modules/module_%.c $$(CORE_$(1)) $(BUILD_ROOT)/obj/arrangement
+	@mkdir -p $$(@D)
+	$$(call plugin_link,$(1),$$<,$(BUILD_ROOT)/obj/module_$$*.$(1).d,MODULE_INTERFACE_VERSION_CURRENT=$$(MODULE_INTERFACE_VERSION),)
 
-feeds/feed_%.$(PLUGIN_SUFFIX_$(1)): src/feeds/feed_%.c $$(CORE_$(1)) obj/arrangement
-	$$(call plugin_link,$(1),$$<,obj/feed_$$*.$(1).d,FEEDS_INTERFACE_VERSION_CURRENT=$$(FEEDS_INTERFACE_VERSION),)
+$(BUILD_ROOT)/feeds/feed_%.$(PLUGIN_SUFFIX_$(1)): src/feeds/feed_%.c $$(CORE_$(1)) $(BUILD_ROOT)/obj/arrangement
+	@mkdir -p $$(@D)
+	$$(call plugin_link,$(1),$$<,$(BUILD_ROOT)/obj/feed_$$*.$(1).d,FEEDS_INTERFACE_VERSION_CURRENT=$$(FEEDS_INTERFACE_VERSION),)
 
-bridges/bridge_%.$(PLUGIN_SUFFIX_$(1)): src/bridges/bridge_%.c $$(CORE_$(1)) obj/arrangement
+$(BUILD_ROOT)/bridges/bridge_%.$(PLUGIN_SUFFIX_$(1)): src/bridges/bridge_%.c $$(CORE_$(1)) $(BUILD_ROOT)/obj/arrangement
 	$$(call plugin_link,$(1),$$<,,BRIDGE_INTERFACE_VERSION_CURRENT=$$(BRIDGE_INTERFACE_VERSION),)
 
-MODULES_LIB_$(1)        := $$(patsubst src/modules/module_%.c,modules/module_%.$(PLUGIN_SUFFIX_$(1)),$$(MODULES_SRC))
-BRIDGES_LIB_$(1)        := $$(patsubst src/bridges/bridge_%.c,bridges/bridge_%.$(PLUGIN_SUFFIX_$(1)),$$(BRIDGES_SRC))
-FEEDS_LIB_$(1)          := $$(patsubst src/feeds/feed_%.c,feeds/feed_%.$(PLUGIN_SUFFIX_$(1)),$$(FEEDS_SRC))
+MODULES_LIB_$(1)        := $$(patsubst src/modules/module_%.c,$(BUILD_ROOT)/modules/module_%.$(PLUGIN_SUFFIX_$(1)),$$(MODULES_SRC))
+BRIDGES_LIB_$(1)        := $$(patsubst src/bridges/bridge_%.c,$(BUILD_ROOT)/bridges/bridge_%.$(PLUGIN_SUFFIX_$(1)),$$(BRIDGES_SRC))
+FEEDS_LIB_$(1)          := $$(patsubst src/feeds/feed_%.c,$(BUILD_ROOT)/feeds/feed_%.$(PLUGIN_SUFFIX_$(1)),$$(FEEDS_SRC))
 
 .PHONY: modules$(PHONY_SUFFIX_$(1)) bridges$(PHONY_SUFFIX_$(1)) feeds$(PHONY_SUFFIX_$(1))
 
@@ -1805,7 +1823,8 @@ define BRIDGE_RULES
 
 BRIDGE_FLAGS_$(2)_$(1)  := $(BRIDGE_CFLAGS_$(2)) $(BRIDGE_CFLAGS_$(2)_$(1))
 
-bridges/$(2).$(PLUGIN_SUFFIX_$(1)): $$(BRIDGE_SRC_$(2)) $$(CORE_$(1)) obj/arrangement $(BRIDGE_DEPS_$(2)_$(1))
+$(BUILD_ROOT)/bridges/$(2).$(PLUGIN_SUFFIX_$(1)): $$(BRIDGE_SRC_$(2)) $$(CORE_$(1)) $(BUILD_ROOT)/obj/arrangement $(BRIDGE_DEPS_$(2)_$(1))
+	@mkdir -p $$(@D)
 	$$(call plugin_link,$(1),$$(BRIDGE_SRC_$(2)),,BRIDGE_INTERFACE_VERSION_CURRENT=$$(BRIDGE_INTERFACE_VERSION),BRIDGE_FLAGS_$(2)_$(1))
 
 endef
@@ -1818,42 +1837,63 @@ $(foreach P,$(PLUGIN_PLATFORMS),$(foreach B,$(BRIDGES_ALL), \
 ##
 
 .PHONY: default
-default: $(HASHCAT_FRONTEND) modules bridges feeds
+default: $(HASHCAT_FRONTEND) modules bridges feeds build_links
+
+## The runtime reads the shared resources from the folder the frontend lives in. Links rather
+## than copies: the tree keeps one copy of the kernel sources and the hcstat2 seed, and a
+## rebuilt kernel cache lands in the build folder with everything else. Windows has no links
+## and reads nothing from the shared folder at build time, so there this is a no-op.
+
+BUILD_LINKS             := OpenCL tunings pcfg hashcat.hcstat2
+
+.PHONY: build_links
+build_links:
+ifneq ($(findstring $(UNAME),CYGWIN MSYS2),)
+	@:
+else
+	@mkdir -p $(BUILD_ROOT)
+	@for LINK in $(BUILD_LINKS); do \
+	  if [ -L "$(BUILD_ROOT)/$$LINK" ]; then :; \
+	  elif [ -e "$(BUILD_ROOT)/$$LINK" ]; then echo "build/$$LINK exists and is not a link" >&2; exit 1; \
+	  else ln -s ../$$LINK $(BUILD_ROOT)/$$LINK; fi; \
+	done
+endif
 
 .PHONY: clean
 clean:
+	$(RM) -rf $(BUILD_ROOT)
 	$(RM) -f $(HASHCAT_FRONTEND)
 	$(RM) -f $(HASHCAT_LIBRARY)
 	$(RM) -f libhashcat.so.*
 	$(RM) -f hashcat.dll
-	$(RM) -rf modules/*.dSYM
-	$(RM) -rf bridges/*.dSYM
-	$(RM) -rf feeds/*.dSYM
+	$(RM) -rf $(BUILD_ROOT)/modules/*.dSYM
+	$(RM) -rf $(BUILD_ROOT)/bridges/*.dSYM
+	$(RM) -rf $(BUILD_ROOT)/feeds/*.dSYM
 	$(RM) -rf *.dSYM
-	$(RM) -f bridges/subs/*.dll
-	$(RM) -f bridges/subs/*.so
-	$(RM) -f bridges/subs/*.su
-	$(RM) -f bridges/*.dll
-	$(RM) -f bridges/*.so
-	$(RM) -f bridges/*.su
-	$(RM) -f feeds/*.dll
-	$(RM) -f feeds/*.so
-	$(RM) -f feeds/*.su
-	$(RM) -f modules/*.dll
-	$(RM) -f modules/*.so
-	$(RM) -f modules/*.su
-	$(RM) -f obj/*/*/*.o
-	$(RM) -f obj/*/*/*.su
-	$(RM) -f obj/*/*/*.d
-	$(RM) -f obj/*/*.o
-	$(RM) -f obj/*/*.su
-	$(RM) -f obj/*/*.d
-	$(RM) -f obj/*.o
-	$(RM) -f obj/*.su
-	$(RM) -f obj/*.d
-	$(RM) -f obj/*.a
-	$(RM) -f obj/*.c
-	$(RM) -f obj/arrangement
+	$(RM) -f $(BUILD_ROOT)/bridges/subs/*.dll
+	$(RM) -f $(BUILD_ROOT)/bridges/subs/*.so
+	$(RM) -f $(BUILD_ROOT)/bridges/subs/*.su
+	$(RM) -f $(BUILD_ROOT)/bridges/*.dll
+	$(RM) -f $(BUILD_ROOT)/bridges/*.so
+	$(RM) -f $(BUILD_ROOT)/bridges/*.su
+	$(RM) -f $(BUILD_ROOT)/feeds/*.dll
+	$(RM) -f $(BUILD_ROOT)/feeds/*.so
+	$(RM) -f $(BUILD_ROOT)/feeds/*.su
+	$(RM) -f $(BUILD_ROOT)/modules/*.dll
+	$(RM) -f $(BUILD_ROOT)/modules/*.so
+	$(RM) -f $(BUILD_ROOT)/modules/*.su
+	$(RM) -f $(BUILD_ROOT)/obj/*/*/*.o
+	$(RM) -f $(BUILD_ROOT)/obj/*/*/*.su
+	$(RM) -f $(BUILD_ROOT)/obj/*/*/*.d
+	$(RM) -f $(BUILD_ROOT)/obj/*/*.o
+	$(RM) -f $(BUILD_ROOT)/obj/*/*.su
+	$(RM) -f $(BUILD_ROOT)/obj/*/*.d
+	$(RM) -f $(BUILD_ROOT)/obj/*.o
+	$(RM) -f $(BUILD_ROOT)/obj/*.su
+	$(RM) -f $(BUILD_ROOT)/obj/*.d
+	$(RM) -f $(BUILD_ROOT)/obj/*.a
+	$(RM) -f $(BUILD_ROOT)/obj/*.c
+	$(RM) -f $(BUILD_ROOT)/obj/arrangement
 	$(RM) -f *.dylib
 	$(RM) -f *.bin *.exe
 	$(RM) -f *.pid
@@ -1905,14 +1945,16 @@ linux: host_linux modules_linux bridges_linux feeds_linux
 win:   host_win   modules_win   bridges_win   feeds_win
 endif
 
-hashcat.bin: src/main.c $(CORE_LINUX) obj/arrangement
-	$(call frontend_link,LINUX,obj/main.LINUX.d,,)
+$(BUILD_ROOT)/hashcat.bin: src/main.c $(CORE_LINUX) $(BUILD_ROOT)/obj/arrangement
+	@mkdir -p $(dir $@)
+	$(call frontend_link,LINUX,$(BUILD_ROOT)/obj/main.LINUX.d,,)
 
 # the frontend keeps iconv on its own link line for the arrangement where there is no library to
 # carry it, and links nothing extra out of it when there is
 
-hashcat.exe: src/main.c $(CORE_WIN) $(WIN_ICONV)/lib/libiconv.a obj/arrangement
-	$(call frontend_link,WIN,obj/main.WIN.d,$(WIN_ICONV)/lib/libiconv.a,)
+$(BUILD_ROOT)/hashcat.exe: src/main.c $(CORE_WIN) $(WIN_ICONV)/lib/libiconv.a $(BUILD_ROOT)/obj/arrangement
+	@mkdir -p $(dir $@)
+	$(call frontend_link,WIN,$(BUILD_ROOT)/obj/main.WIN.d,$(WIN_ICONV)/lib/libiconv.a,)
 
 endif
 
@@ -2018,20 +2060,20 @@ install_kernels: install_shared
 .PHONY: install_modules
 install_modules: install_shared modules
 	$(INSTALL) -m 755 -d                                                    $(DESTDIR)$(SHARED_FOLDER)/modules
-	$(FIND) modules/  -mindepth 1 -type d -execdir $(INSTALL) -m 755 -d     $(DESTDIR)$(SHARED_FOLDER)/modules/{} \;
-	$(FIND) modules/  -mindepth 1 -type f -execdir $(INSTALL) -m 644 {}     $(DESTDIR)$(SHARED_FOLDER)/modules/{} \;
+	$(FIND) $(BUILD_ROOT)/modules/  -mindepth 1 -type d -execdir $(INSTALL) -m 755 -d     $(DESTDIR)$(SHARED_FOLDER)/modules/{} \;
+	$(FIND) $(BUILD_ROOT)/modules/  -mindepth 1 -type f -execdir $(INSTALL) -m 644 {}     $(DESTDIR)$(SHARED_FOLDER)/modules/{} \;
 
 .PHONY: install_bridges
 install_bridges: install_shared bridges
 	$(INSTALL) -m 755 -d                                                    $(DESTDIR)$(SHARED_FOLDER)/bridges
-	$(FIND) bridges/  -mindepth 1 -type d -execdir $(INSTALL) -m 755 -d     $(DESTDIR)$(SHARED_FOLDER)/bridges/{} \;
-	$(FIND) bridges/  -mindepth 1 -type f -execdir $(INSTALL) -m 644 {}     $(DESTDIR)$(SHARED_FOLDER)/bridges/{} \;
+	$(FIND) $(BUILD_ROOT)/bridges/  -mindepth 1 -type d -execdir $(INSTALL) -m 755 -d     $(DESTDIR)$(SHARED_FOLDER)/bridges/{} \;
+	$(FIND) $(BUILD_ROOT)/bridges/  -mindepth 1 -type f -execdir $(INSTALL) -m 644 {}     $(DESTDIR)$(SHARED_FOLDER)/bridges/{} \;
 
 .PHONY: install_feeds
 install_feeds: install_shared feeds
 	$(INSTALL) -m 755 -d                                                    $(DESTDIR)$(SHARED_FOLDER)/feeds
-	$(FIND) feeds/    -mindepth 1 -type d -execdir $(INSTALL) -m 755 -d     $(DESTDIR)$(SHARED_FOLDER)/feeds/{} \;
-	$(FIND) feeds/    -mindepth 1 -type f -execdir $(INSTALL) -m 644 {}     $(DESTDIR)$(SHARED_FOLDER)/feeds/{} \;
+	$(FIND) $(BUILD_ROOT)/feeds/    -mindepth 1 -type d -execdir $(INSTALL) -m 755 -d     $(DESTDIR)$(SHARED_FOLDER)/feeds/{} \;
+	$(FIND) $(BUILD_ROOT)/feeds/    -mindepth 1 -type f -execdir $(INSTALL) -m 644 {}     $(DESTDIR)$(SHARED_FOLDER)/feeds/{} \;
 
 .PHONY: install_library
 install_library: $(HASHCAT_LIBRARY)
@@ -2039,7 +2081,7 @@ install_library: $(HASHCAT_LIBRARY)
 	$(INSTALL) -m 755 $(HASHCAT_LIBRARY)                                    $(DESTDIR)$(LIBRARY_FOLDER)/
 
 .PHONY: install_library_dev
-install_library_dev: install_make_library_dev_root obj/api.c
+install_library_dev: install_make_library_dev_root $(BUILD_ROOT)/obj/api.c
 	$(INSTALL) -m 755 -d                                                    $(DESTDIR)$(LIBRARY_DEV_FOLDER)
 	$(if $(HASHCAT_LIBRARY_DEV_$(FORMAT_NATIVE)),ln -sf $(HASHCAT_LIBRARY_NATIVE) $(DESTDIR)$(LIBRARY_FOLDER)/$(HASHCAT_LIBRARY_DEV_$(FORMAT_NATIVE)))
 	$(INSTALL) -m 644 $(API_HEADERS)                                        $(DESTDIR)$(LIBRARY_DEV_FOLDER)/
@@ -2067,7 +2109,7 @@ install_tools:
 uninstall:
 	$(RM) -f  $(DESTDIR)$(INSTALL_FOLDER)/$(HASHCAT_FRONTEND)
 	$(RM) -f  $(addprefix $(DESTDIR)$(INSTALL_FOLDER)/,$(notdir ${TOOLS}))
-	$(RM) -f  $(DESTDIR)$(LIBRARY_FOLDER)/$(HASHCAT_LIBRARY)
+	$(RM) -f  $(DESTDIR)$(LIBRARY_FOLDER)/$(HASHCAT_LIBRARY_NATIVE)
 	$(RM) -rf $(DESTDIR)$(LIBRARY_DEV_FOLDER)
 	$(RM) -rf $(DESTDIR)$(SHARED_FOLDER)
 	$(RM) -rf $(DESTDIR)$(DOCUMENT_FOLDER)

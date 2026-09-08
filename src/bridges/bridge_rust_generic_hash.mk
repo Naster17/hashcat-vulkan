@@ -1,10 +1,12 @@
+BUILD_ROOT      ?= build
+
 RUST_BUILD_MODE ?= release
 
 RUST_CARGO      ?= cargo
 RUST_RUSTUP     ?= rustup
 
 RUST_SCAN_DIR   := Rust/bridges
-RUST_SUBS_DIR   := bridges/subs
+RUST_SUBS_DIR   := $(BUILD_ROOT)/bridges/subs
 RUST_MODE_FLAG  := $(if $(filter $(RUST_BUILD_MODE),release),--release,)
 
 CARGO_PRESENT   := false
@@ -72,11 +74,13 @@ endif
 # during a dry run.
 $(RUST_SUBS_DIR)/%.so: $(RUST_SCAN_DIR)/%/Cargo.toml
 	MAKEFLAGS= RUSTFLAGS="$(RUSTFLAGS_SO)" $(RUST_CARGO) build --quiet $(RUST_MODE_FLAG) --manifest-path $^
+	@mkdir -p $(dir $@)
 	cp Rust/bridges/$*/target/$(RUST_BUILD_MODE)/lib$*.$(RUST_LIB_EXT) $@
 ifeq ($(RUSTUP_PRESENT),true)
 $(RUST_SUBS_DIR)/%.dll: $(RUST_SCAN_DIR)/%/Cargo.toml
 	$(RUST_RUSTUP) --quiet target add x86_64-pc-windows-gnu
 	MAKEFLAGS= RUSTFLAGS="$(RUSTFLAGS_DLL)" $(RUST_CARGO) build --quiet $(RUST_MODE_FLAG) --manifest-path $^ --target x86_64-pc-windows-gnu
+	@mkdir -p $(dir $@)
 	cp Rust/bridges/$*/target/x86_64-pc-windows-gnu/$(RUST_BUILD_MODE)/$*.dll $@
 else
 $(RUST_SUBS_DIR)/%.dll: $(RUST_SCAN_DIR)/%/Cargo.toml

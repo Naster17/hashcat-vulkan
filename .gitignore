@@ -75,3 +75,4 @@ __pycache__/
 amd-bc250-docs/
 dist/
 
+/build/

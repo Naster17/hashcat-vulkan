@@ -1,3 +1,5 @@
+BUILD_ROOT ?= build
+
 BRIDGE_SRC_bridge_python_generic_hash_sp := src/bridges/bridge_python_generic_hash_sp.c src/cpu_features.c
 
 PYTHON_SP_SKIP_SO  := false
@@ -59,7 +61,7 @@ RESET = \033[0m
 ifeq ($(PYTHON_SP_SKIP_SO),true)
 BRIDGE_SKIP_bridge_python_generic_hash_sp_$(PLUGIN_PLATFORM_so) := 1
 
-bridges/bridge_python_generic_hash_sp.so:
+$(BUILD_ROOT)/bridges/bridge_python_generic_hash_sp.so:
 	@echo ""
 	@echo "$(RED)WARNING$(RESET): Skipping freethreaded plugin 72000: Python 3.12+ headers not found."
 	@echo "         To use -m 72000, you must install the required Python headers."
@@ -71,7 +73,7 @@ endif
 ifeq ($(PYTHON_SP_SKIP_DLL),true)
 BRIDGE_SKIP_bridge_python_generic_hash_sp_$(PLUGIN_PLATFORM_dll) := 1
 
-bridges/bridge_python_generic_hash_sp.dll:
+$(BUILD_ROOT)/bridges/bridge_python_generic_hash_sp.dll:
 	@echo ""
 	@echo "$(RED)WARNING$(RESET): Skipping freethreaded plugin 72000: Python Windows headers not found."
 	@echo "         To use -m 72000, you must install the required Python headers."
