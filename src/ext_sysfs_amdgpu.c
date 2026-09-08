@@ -332,6 +332,52 @@ int hm_SYSFS_AMDGPU_get_temperature_current (void *hashcat_ctx, const int backen
 
 int hm_SYSFS_AMDGPU_get_pp_dpm_sclk (void *hashcat_ctx, const int backend_device_idx, int *val)
 {
+  // some boards (BC-250 with UMA among them) run a DPM table whose entries carry
+  // nonsense clocks, and the entry the firmware marks current can read 5..20 MHz
+  // while the engine actually runs at full speed. The hwmon exposes the measured
+  // clock of the engine itself, so that reading is preferred when it exists.
+
+  char *hmpath = hm_SYSFS_AMDGPU_get_syspath_hwmon (hashcat_ctx, backend_device_idx);
+
+  if (hmpath != NULL)
+  {
+    char *path;
+
+    hc_asprintf (&path, "%s/freq1_input", hmpath);
+
+    hcfree (hmpath);
+
+    if (hc_path_read (path) == true)
+    {
+      HCFILE fp;
+
+      if (hc_fopen (&fp, path, "r") == true)
+      {
+        char buf[HCBUFSIZ_TINY] = { 0 };
+
+        char *ptr = sysfs_fgets_timeout (buf, sizeof (buf), &fp);
+
+        hc_fclose (&fp);
+
+        if (ptr != NULL)
+        {
+          long hz = strtol (ptr, NULL, 10);
+
+          if (hz > 0)
+          {
+            *val = (int) (hz / 1000000L);
+
+            hcfree (path);
+
+            return 0;
+          }
+        }
+      }
+    }
+
+    hcfree (path);
+  }
+
   char *syspath = hm_SYSFS_AMDGPU_get_syspath_device (hashcat_ctx, backend_device_idx);
 
   if (syspath == NULL) return -1;
