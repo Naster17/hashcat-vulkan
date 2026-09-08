@@ -1963,6 +1963,16 @@ $(BUILD_ROOT)/hashcat.exe: src/main.c $(CORE_WIN) $(WIN_ICONV)/lib/libiconv.a $(
 	@mkdir -p $(dir $@)
 	$(call frontend_link,WIN,$(BUILD_ROOT)/obj/main.WIN.d,$(WIN_ICONV)/lib/libiconv.a,)
 
+# the release goals name the frontend the way a packaged archive does. The platform rule builds it
+# in the build folder, and the archive packs it from the root, so the goal is answered with a copy.
+
+.PHONY: hashcat.bin hashcat.exe
+hashcat.bin: $(BUILD_ROOT)/hashcat.bin
+	cp $< $@
+
+hashcat.exe: $(BUILD_ROOT)/hashcat.exe
+	cp $< $@
+
 endif
 
 ##
