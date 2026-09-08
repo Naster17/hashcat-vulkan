@@ -58,6 +58,7 @@ int vk_init (void *hashcat_ctx)
 
   VK_LOAD (vkEnumeratePhysicalDevices);
   VK_LOAD (vkGetPhysicalDeviceProperties);
+  VK_LOAD (vkGetPhysicalDeviceProperties2);
   VK_LOAD (vkGetPhysicalDeviceQueueFamilyProperties);
   VK_LOAD (vkGetPhysicalDeviceMemoryProperties);
   VK_LOAD (vkCreateDevice);

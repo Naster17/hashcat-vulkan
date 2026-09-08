@@ -9942,6 +9942,16 @@ static void backend_ctx_devices_init_opencl (hashcat_ctx_t *hashcat_ctx, int *vi
             #endif
           }
 
+          // An AMD GPU behind a non-vendor OpenCL platform (Mesa rusticl, POCL, ...)
+          // can still be monitored through the Linux amdgpu sysfs interface, same as above
+
+          if ((device_param->opencl_platform_vendor_id != VENDOR_ID_AMD) && (device_param->opencl_device_vendor_id == VENDOR_ID_AMD))
+          {
+            #if defined (__linux__)
+            backend_ctx->need_sysfs_amdgpu = true;
+            #endif
+          }
+
           if ((device_param->opencl_platform_vendor_id == VENDOR_ID_NV) && (device_param->opencl_device_vendor_id == VENDOR_ID_NV))
           {
             backend_ctx->need_nvml = true;
@@ -10235,6 +10245,47 @@ static void backend_ctx_devices_init_opencl (hashcat_ctx_t *hashcat_ctx, int *vi
                   }
                 }
               }
+            }
+          }
+
+          // Generic PCI address fallback for platforms without a vendor specific query above
+          // (Mesa rusticl, POCL, ...): use the standardized cl_khr_pci_bus_info extension.
+          // The numeric value of CL_DEVICE_PCI_BUS_INFO_KHR equals CL_DEVICE_PCI_BUS_INFO_INTEL (0x410F).
+
+          if ((device_param->pcie_bus == 0) && (device_param->pcie_device == 0) && (device_param->pcie_function == 0))
+          {
+            size_t pci_ext_size = 0;
+
+            if (hc_clGetDeviceInfo (hashcat_ctx, device_param->opencl_device, CL_DEVICE_EXTENSIONS, 0, NULL, &pci_ext_size) != -1)
+            {
+              char *pci_ext = (char *) hcmalloc (pci_ext_size + 1);
+
+              if (hc_clGetDeviceInfo (hashcat_ctx, device_param->opencl_device, CL_DEVICE_EXTENSIONS, pci_ext_size, pci_ext, NULL) != -1)
+              {
+                if (strstr (pci_ext, "cl_khr_pci_bus_info") != NULL)
+                {
+                  #define CL_DEVICE_PCI_BUS_INFO_KHR 0x410F
+
+                  typedef struct _cl_device_pci_bus_info_khr {
+                      cl_uint pci_domain;
+                      cl_uint pci_bus;
+                      cl_uint pci_device;
+                      cl_uint pci_function;
+                  } cl_device_pci_bus_info_khr;
+
+                  cl_device_pci_bus_info_khr pci_info;
+
+                  if (hc_clGetDeviceInfo (hashcat_ctx, device_param->opencl_device, CL_DEVICE_PCI_BUS_INFO_KHR, sizeof (pci_info), &pci_info, NULL) == 0)
+                  {
+                    device_param->pcie_domain   = pci_info.pci_domain;
+                    device_param->pcie_bus      = pci_info.pci_bus;
+                    device_param->pcie_device   = pci_info.pci_device;
+                    device_param->pcie_function = pci_info.pci_function;
+                  }
+                }
+              }
+
+              hcfree (pci_ext);
             }
           }
         }
@@ -10828,12 +10879,45 @@ static void backend_ctx_devices_init_vulkan (hashcat_ctx_t *hashcat_ctx, int *ba
 
     device_param->kernel_exec_timeout = 0;
 
-    // no PCI info under vulkan, leave all zero
+    // PCI address: ask the driver through VK_EXT_pci_bus_info (part of Vulkan 1.1,
+    // reported by every relevant Linux driver), needed by the amdgpu sysfs monitor
 
     device_param->pcie_domain   = 0;
     device_param->pcie_bus      = 0;
     device_param->pcie_device   = 0;
     device_param->pcie_function = 0;
+
+    if (vk->vkGetPhysicalDeviceProperties2 != NULL)
+    {
+      VkPhysicalDevicePCIBusInfoPropertiesEXT vk_pci;
+
+      memset (&vk_pci, 0, sizeof (vk_pci));
+
+      vk_pci.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT;
+      vk_pci.pNext = NULL;
+
+      VkPhysicalDeviceProperties2 vk_props2;
+
+      memset (&vk_props2, 0, sizeof (vk_props2));
+
+      vk_props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+      vk_props2.pNext = &vk_pci;
+
+      vk->vkGetPhysicalDeviceProperties2 (physical_device, &vk_props2);
+
+      device_param->pcie_bus      = (u8) vk_pci.pciBus;
+      device_param->pcie_device   = (u8) vk_pci.pciDevice;
+      device_param->pcie_function = (u8) vk_pci.pciFunction;
+    }
+
+    // an AMD GPU is monitorable through the Linux amdgpu sysfs interface
+
+    #if defined (__linux__)
+    if (p.vendorID == 0x1002)
+    {
+      backend_ctx->need_sysfs_amdgpu = true;
+    }
+    #endif
 
     // preferred wave width: use the wavefront size when the driver reported it
 
