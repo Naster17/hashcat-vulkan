@@ -120,6 +120,17 @@ int hm_SYSFS_AMDGPU_get_fan_speed_current (void *hashcat_ctx, const int backend_
 
   hcfree (syspath);
 
+  // many boards have no pwm capable gpu fan, the pwm then sits on a separate
+  // super i/o chip outside of the gpu hwmon, so fail quietly when it is absent
+
+  if (hc_path_read (path_cur) == false)
+  {
+    hcfree (path_cur);
+    hcfree (path_max);
+
+    return -1;
+  }
+
   HCFILE fp_cur;
 
   if (hc_fopen (&fp_cur, path_cur, "r") == false)
@@ -274,7 +285,7 @@ int hm_SYSFS_AMDGPU_get_pp_dpm_sclk (void *hashcat_ctx, const int backend_device
 
     char *ptr = hc_fgets (buf, sizeof (buf), &fp);
 
-    if (ptr == NULL) continue;
+    if (ptr == NULL) break;
 
     size_t len = strlen (ptr);
 
@@ -329,7 +340,7 @@ int hm_SYSFS_AMDGPU_get_pp_dpm_mclk (void *hashcat_ctx, const int backend_device
 
     char *ptr = hc_fgets (buf, sizeof (buf), &fp);
 
-    if (ptr == NULL) continue;
+    if (ptr == NULL) break;
 
     size_t len = strlen (ptr);
 
@@ -384,7 +395,7 @@ int hm_SYSFS_AMDGPU_get_pp_dpm_pcie (void *hashcat_ctx, const int backend_device
 
     char *ptr = hc_fgets (buf, sizeof (buf), &fp);
 
-    if (ptr == NULL) continue;
+    if (ptr == NULL) break;
 
     size_t len = strlen (ptr);
 
@@ -435,7 +446,7 @@ int hm_SYSFS_AMDGPU_get_gpu_busy_percent (void *hashcat_ctx, const int backend_d
 
     char *ptr = hc_fgets (buf, sizeof (buf), &fp);
 
-    if (ptr == NULL) continue;
+    if (ptr == NULL) break;
 
     size_t len = strlen (ptr);
 
@@ -486,7 +497,7 @@ int hm_SYSFS_AMDGPU_get_mem_info_vram_used (void *hashcat_ctx, const int backend
 
     char *ptr = hc_fgets (buf, sizeof (buf), &fp);
 
-    if (ptr == NULL) continue;
+    if (ptr == NULL) break;
 
     size_t len = strlen (ptr);
 
