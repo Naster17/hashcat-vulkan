@@ -1319,7 +1319,7 @@ else ifeq ($(FORMAT_NATIVE),PE)
 LFLAGS_FRONTEND_NATIVE  :=
 LFLAGS_PLUGIN_NATIVE    :=
 else
-LFLAGS_FRONTEND_NATIVE  := -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,$(LIBRARY_FOLDER) -Wl,-z,origin
+LFLAGS_FRONTEND_NATIVE  := -Wl,-rpath,'$$ORIGIN/build' -Wl,-rpath,$(LIBRARY_FOLDER) -Wl,-z,origin
 LFLAGS_PLUGIN_NATIVE    := -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,$(LIBRARY_FOLDER) -Wl,-z,origin
 ## A plugin is a shared object too, so it meets the same wall the library does on OpenBSD, where the
 ## driver does not link libc into one and -z,defs then reads the whole of libc as undefined. Guarding
@@ -1851,7 +1851,7 @@ default: $(HASHCAT_FRONTEND) modules bridges feeds root_links
 ## library live in the build folder, and the root carries links to them. Windows has no links,
 ## so there the build folder is the root and nothing is linked.
 
-ROOT_LINKS              := modules bridges feeds libhashcat.so.7
+ROOT_LINKS              := modules bridges feeds
 
 .PHONY: root_links
 root_links:
